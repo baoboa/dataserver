@@ -249,7 +249,8 @@ class Zotero_Collections extends Zotero_DataObjects {
 		$content = $content[0];
 		
 		$xml = new SimpleXMLElement(
-			'<entry xmlns="' . Zotero_Atom::$nsAtom
+			'<?xml version="1.0" encoding="UTF-8"?>'
+			. '<entry xmlns="' . Zotero_Atom::$nsAtom
 			. '" xmlns:zapi="' . Zotero_Atom::$nsZoteroAPI . '"/>'
 		);
 		
@@ -333,10 +334,10 @@ class Zotero_Collections extends Zotero_DataObjects {
 	                                      $userID,
 	                                      $requireVersion=0) {
 		Zotero_API::processJSONObjectKey($collection, $json);
+		self::validateJSONCollection($json, $requestParams);
 		Zotero_API::checkJSONObjectVersion(
 			$collection, $json, $requestParams, $requireVersion
 		);
-		self::validateJSONCollection($json, $requestParams);
 		
 		$changed = false;
 		

@@ -1013,7 +1013,7 @@ class Zotero_Items extends Zotero_DataObjects {
 		);
 		$cachedParams = Z_Array::filterKeys($queryParams, $allowedParams);
 		
-		$cacheVersion = 1;
+		$cacheVersion = 2;
 		$cacheKey = "atomEntry_" . $item->libraryID . "/" . $item->id . "_"
 			. md5(
 				$version
@@ -1127,7 +1127,7 @@ class Zotero_Items extends Zotero_DataObjects {
 				StatsD::increment("memcached.items.itemToAtom.hit");
 				
 				// Skip the cache every 10 times for now, to ensure cache sanity
-				if (true || Z_Core::probability(10)) {
+				if (Z_Core::probability(10)) {
 					$xmlstr = $xml->saveXML();
 				}
 				else {
@@ -1145,7 +1145,8 @@ class Zotero_Items extends Zotero_DataObjects {
 		$contentParamString = urlencode(implode(',', $content));
 		$style = $queryParams['style'];
 		
-		$entry = '<entry xmlns="' . Zotero_Atom::$nsAtom . '" xmlns:zapi="' . Zotero_Atom::$nsZoteroAPI . '"/>';
+		$entry = '<?xml version="1.0" encoding="UTF-8"?>'
+			. '<entry xmlns="' . Zotero_Atom::$nsAtom . '" xmlns:zapi="' . Zotero_Atom::$nsZoteroAPI . '"/>';
 		$xml = new SimpleXMLElement($entry);
 		
 		$title = $item->getDisplayTitle(true);
@@ -1412,6 +1413,11 @@ class Zotero_Items extends Zotero_DataObjects {
 					$uncached
 				);
 				$uncached = str_replace(
+					'<title></title>',
+					'<title/>',
+					$uncached
+				);
+				$uncached = str_replace(
 					'<note></note>',
 					'<note/>',
 					$uncached
@@ -1419,6 +1425,11 @@ class Zotero_Items extends Zotero_DataObjects {
 				$uncached = str_replace(
 					'<path></path>',
 					'<path/>',
+					$uncached
+				);
+				$uncached = str_replace(
+					'<td></td>',
+					'<td/>',
 					$uncached
 				);
 				
@@ -1462,7 +1473,7 @@ class Zotero_Items extends Zotero_DataObjects {
 	 * Returns an array of keys of added items (like updateMultipleFromJSON) or an object
 	 * with a 'select' property containing an array of titles for multi-item results
 	 */
-	public static function addFromURL($json, $libraryID, $userID, $translationToken) {
+	public static function addFromURL($json, $libraryID, $userID, $translationToken, $requestParams) {
 		self::validateJSONURL($json);
 		
 		$response = Zotero_Translate::doWeb(
@@ -1477,7 +1488,7 @@ class Zotero_Items extends Zotero_DataObjects {
 		
 		if (isset($response->items)) {
 			try {
-				self::validateMultiObjectJSON('items', $response);
+				self::validateMultiObjectJSON($response, $requestParams);
 			}
 			catch (Exception $e) {
 				error_log($e);
@@ -1493,7 +1504,14 @@ class Zotero_Items extends Zotero_DataObjects {
 			throw new Exception("Invalid return value from doWeb()");
 		}
 		
-		return self::updateMultipleFromJSON($response, $libraryID, null, $userID);
+		return self::updateMultipleFromJSON(
+			$response,
+			$libraryID,
+			$requestParams,
+			$userID,
+			false,
+			null
+		);
 	}
 	
 	
@@ -1505,10 +1523,6 @@ class Zotero_Items extends Zotero_DataObjects {
 	                                      $requireVersion=0,
 	                                      $partialUpdate=false) {
 		$exists = Zotero_API::processJSONObjectKey($item, $json);
-		Zotero_API::checkJSONObjectVersion(
-			$item, $json, $requestParams, $requireVersion
-		);
-		
 		self::validateJSONItem(
 			$json,
 			$item->libraryID,
@@ -1516,6 +1530,9 @@ class Zotero_Items extends Zotero_DataObjects {
 			$parentItem || ($exists ? !!$item->getSourceKey() : false),
 			$requestParams,
 			$partialUpdate
+		);
+		Zotero_API::checkJSONObjectVersion(
+			$item, $json, $requestParams, $requireVersion
 		);
 		
 		$changed = false;
@@ -1533,6 +1550,8 @@ class Zotero_Items extends Zotero_DataObjects {
 		if (isset($json->itemType)) {
 			$item->setField("itemTypeID", Zotero_ItemTypes::getID($json->itemType));
 		}
+		
+		$changedDateModified = false;
 		
 		foreach ($json as $key=>$val) {
 			switch ($key) {
@@ -1703,6 +1722,10 @@ class Zotero_Items extends Zotero_DataObjects {
 					$item->attachmentStorageModTime = $val;
 					break;
 				
+				case 'dateModified':
+					$changedDateModified = $item->setField($key, $val);
+					break;
+				
 				default:
 					$item->setField($key, $val);
 					break;
@@ -1721,7 +1744,7 @@ class Zotero_Items extends Zotero_DataObjects {
 		$item->deleted = !empty($json->deleted);
 		
 		// If item has changed, update it with the current timestamp
-		if ($item->hasChanged()) {
+		if ($item->hasChanged() && !$changedDateModified) {
 			$item->dateModified = Zotero_DB::getTransactionTimestamp();
 		}
 		
@@ -1885,6 +1908,10 @@ class Zotero_Items extends Zotero_DataObjects {
 					
 					foreach ($val as $tag) {
 						$empty = true;
+						
+						if (!is_object($tag)) {
+							throw new Exception("Tag must be an object", Z_ERROR_INVALID_INPUT);
+						}
 						
 						foreach ($tag as $k=>$v) {
 							switch ($k) {
@@ -2089,7 +2116,7 @@ class Zotero_Items extends Zotero_DataObjects {
 						throw new Exception("'$val' is not a valid linkMode", Z_ERROR_INVALID_INPUT);
 					}
 					// Don't allow changing of linkMode
-					if ($item && $linkMode != $item->attachmentLinkMode) {
+					if (!$isNew && $linkMode != $item->attachmentLinkMode) {
 						throw new Exception("Cannot change attachment linkMode", Z_ERROR_INVALID_INPUT);
 					}
 					break;
@@ -2138,6 +2165,22 @@ class Zotero_Items extends Zotero_DataObjects {
 						if ($val && !preg_match("/^[a-f0-9]{32}$/", $val)) {
 							throw new Exception("'$val' is not a valid MD5 hash", Z_ERROR_INVALID_INPUT);
 						}
+					}
+					break;
+				
+				case 'dateAdded':
+					if (!Zotero_Date::isSQLDateTime($val)) {
+						throw new Exception("'$key' must be in the form 'YYYY-MM-DD HH:MM:SS'", Z_ERROR_INVALID_INPUT);
+					}
+					
+					if (!$isNew && $val != $item->$key) {
+						throw new Exception("'$key' cannot be modified for existing items", Z_ERROR_INVALID_INPUT);
+					}
+					break;
+				
+				case 'dateModified':
+					if (!Zotero_Date::isSQLDateTime($val)) {
+						throw new Exception("'$key' must be in the form 'YYYY-MM-DD HH:MM:SS'", Z_ERROR_INVALID_INPUT);
 					}
 					break;
 				

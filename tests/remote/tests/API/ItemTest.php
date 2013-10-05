@@ -125,6 +125,128 @@ class ItemTests extends APITests {
 	}
 	
 	
+	public function testDateAdded() {
+		// In case this is ever extended to other objects
+		$objectType = 'item';
+		$objectTypePlural = API::getPluralObjectType($objectType);
+		
+		switch ($objectType) {
+		case 'item':
+			$itemData = array(
+				"title" => "Test"
+			);
+			$xml = API::createItem("videoRecording", $itemData, $this, 'atom');
+			break;
+		}
+		
+		$newDateAdded = "2013-03-03 21:33:53";
+		
+		$data = API::parseDataFromAtomEntry($xml);
+		$objectKey = $data['key'];
+		$json = json_decode($data['content'], true);
+		
+		$json['title'] = "Test 2";
+		$json['dateAdded'] = $newDateAdded;
+		$response = API::userPut(
+			self::$config['userID'],
+			"$objectTypePlural/$objectKey?key=" . self::$config['apiKey'],
+			json_encode($json)
+		);
+		$this->assert400($response, "'dateAdded' cannot be modified for existing $objectTypePlural");
+	}
+	
+	
+	public function testDateModified() {
+		// In case this is ever extended to other objects
+		$objectType = 'item';
+		$objectTypePlural = API::getPluralObjectType($objectType);
+		
+		switch ($objectType) {
+		case 'item':
+			$itemData = array(
+				"title" => "Test"
+			);
+			$xml = API::createItem("videoRecording", $itemData, $this, 'atom');
+			break;
+		}
+		
+		$data = API::parseDataFromAtomEntry($xml);
+		$objectKey = $data['key'];
+		$json = json_decode($data['content'], true);
+		$dateModified1 = (string) array_shift($xml->xpath('//atom:entry/atom:updated'));
+		
+		// Make sure we're in the next second
+		sleep(1);
+		
+		//
+		// If no explicit dateModified, use current timestamp
+		//
+		$json['title'] = "Test 2";
+		$response = API::userPut(
+			self::$config['userID'],
+			"$objectTypePlural/$objectKey?key=" . self::$config['apiKey'],
+			json_encode($json)
+		);
+		$this->assert204($response);
+		
+		switch ($objectType) {
+		case 'item':
+			$xml = API::getItemXML($objectKey);
+			break;
+		}
+		
+		$dateModified2 = (string) array_shift($xml->xpath('//atom:entry/atom:updated'));
+		$this->assertNotEquals($dateModified1, $dateModified2);
+		$json = json_decode(API::parseDataFromAtomEntry($xml)['content'], true);
+		
+		// Make sure we're in the next second
+		sleep(1);
+		
+		//
+		// If existing dateModified, use current timestamp
+		//
+		$json['title'] = "Test 3";
+		$json['dateModified'] = trim(preg_replace("/[TZ]/", " ", $dateModified2));
+		$response = API::userPut(
+			self::$config['userID'],
+			"$objectTypePlural/$objectKey?key=" . self::$config['apiKey'],
+			json_encode($json)
+		);
+		$this->assert204($response);
+		
+		switch ($objectType) {
+		case 'item':
+			$xml = API::getItemXML($objectKey);
+			break;
+		}
+		
+		$dateModified3 = (string) array_shift($xml->xpath('//atom:entry/atom:updated'));
+		$this->assertNotEquals($dateModified2, $dateModified3);
+		$json = json_decode(API::parseDataFromAtomEntry($xml)['content'], true);
+		
+		//
+		// If explicit dateModified, use that
+		//
+		$newDateModified = "2013-03-03 21:33:53";
+		$json['title'] = "Test 4";
+		$json['dateModified'] = $newDateModified;
+		$response = API::userPut(
+			self::$config['userID'],
+			"$objectTypePlural/$objectKey?key=" . self::$config['apiKey'],
+			json_encode($json)
+		);
+		$this->assert204($response);
+		
+		switch ($objectType) {
+		case 'item':
+			$xml = API::getItemXML($objectKey);
+			break;
+		}
+		$dateModified4 = (string) array_shift($xml->xpath('//atom:entry/atom:updated'));
+		$this->assertEquals($newDateModified, trim(preg_replace("/[TZ]/", " ", $dateModified4)));
+	}
+	
+	
 	public function testChangeItemType() {
 		$json = API::getItemTemplate("book");
 		$json->title = "Foo";
@@ -361,6 +483,30 @@ class ItemTests extends APITests {
 		$key = API::createItem("book", false, $this, 'key');
 		$xml = API::createAttachmentItem("linked_url", $key, $this, 'atom');
 		return API::parseDataFromAtomEntry($xml);
+	}
+	
+	
+	public function testNewEmptyLinkAttachmentItemWithItemKey() {
+		$key = API::createItem("book", false, $this, 'key');
+		$xml = API::createAttachmentItem("linked_url", $key, $this, 'atom');
+		
+		$response = API::get("items/new?itemType=attachment&linkMode=linked_url");
+		$json = json_decode($response->getBody());
+		$json->parentItem = $key;
+		require_once '../../model/Utilities.inc.php';
+		require_once '../../model/ID.inc.php';
+		$json->itemKey = Zotero_ID::getKey();
+		$json->itemVersion = 0;
+		
+		$response = API::userPost(
+			self::$config['userID'],
+			"items?key=" . self::$config['apiKey'],
+			json_encode(array(
+				"items" => array($json)
+			)),
+			array("Content-Type: application/json")
+		);
+		$this->assert200ForObject($response);
 	}
 	
 	
@@ -755,5 +901,29 @@ class ItemTests extends APITests {
 		$data = API::parseDataFromAtomEntry($xml);
 		$json = json_decode($data['content']);
 		$this->assertEquals($date, $json->date);
+	}
+	
+	
+	public function testUnicodeTitle() {
+		$title = "Tést";
+		
+		$xml = API::createItem("book", array("title" => $title), $this);
+		$data = API::parseDataFromAtomEntry($xml);
+		$key = $data['key'];
+		
+		// Test entry
+		$response = API::userGet(
+			self::$config['userID'],
+			"items/$key?key=" . self::$config['apiKey'] . "&content=json"
+		);
+		$this->assertContains('"title":"Tést"', $response->getBody());
+		
+		// Test feed
+		$response = API::userGet(
+			self::$config['userID'],
+			"items?key=" . self::$config['apiKey'] . "&content=json"
+		);
+		$this->assertContains('"title":"Tést"', $response->getBody());
+		echo($response->getBody());
 	}
 }

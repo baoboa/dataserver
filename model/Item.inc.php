@@ -759,16 +759,18 @@ class Zotero_Item {
 				trigger_error("Value '$value' of type " . gettype($value) . " does not validate for field '$field'", E_USER_ERROR);
 			}
 			
-			if ($this->$field != $value) {
-				Z_Core::debug("Field $field has changed from {$this->$field} to $value", 4);
-				
-				if ($field == 'itemTypeID') {
-					$this->setType($value, $loadIn);
-				}
-				else {
-					$this->$field = $value;
-					$this->changed['primaryData'][$field] = true;
-				}
+			if ($this->$field == $value) {
+				return false;
+			}
+			
+			Z_Core::debug("Field $field has changed from {$this->$field} to $value", 4);
+			
+			if ($field == 'itemTypeID') {
+				$this->setType($value, $loadIn);
+			}
+			else {
+				$this->$field = $value;
+				$this->changed['primaryData'][$field] = true;
 			}
 			
 			return true;
@@ -1023,7 +1025,7 @@ class Zotero_Item {
 			trigger_error("Library ID must be set before saving", E_USER_ERROR);
 		}
 		
-		Zotero_Items::editCheck($this);
+		Zotero_Items::editCheck($this, $userID);
 		
 		if (!$this->hasChanged()) {
 			Z_Core::debug("Item $this->id has not changed");
@@ -1374,11 +1376,12 @@ class Zotero_Item {
 					
 					$sql = "INSERT IGNORE INTO relations "
 						 . "(relationID, libraryID, subject, predicate, object) "
-						 . "VALUES (NULL, ?, ?, ?, ?)";
+						 . "VALUES (?, ?, ?, ?, ?)";
 					$insertStatement = Zotero_DB::getStatement($sql, false, $shardID);
 					foreach ($this->relatedItems as $relatedItemKey) {
 						$insertStatement->execute(
 							array(
+								Zotero_ID::get('relations'),
 								$this->libraryID,
 								$uri,
 								Zotero_Relations::$relatedItemPredicate,
@@ -1885,12 +1888,13 @@ class Zotero_Item {
 					if ($new) {
 						$sql = "INSERT IGNORE INTO relations "
 						     . "(relationID, libraryID, subject, predicate, object) "
-						     . "VALUES (NULL, ?, ?, ?, ?)";
+						     . "VALUES (?, ?, ?, ?, ?)";
 						$insertStatement = Zotero_DB::getStatement($sql, false, $shardID);
 						
 						foreach ($new as $relatedItemKey) {
 							$insertStatement->execute(
 								array(
+									Zotero_ID::get('relations'),
 									$this->libraryID,
 									$uri,
 									Zotero_Relations::$relatedItemPredicate,

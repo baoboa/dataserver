@@ -25,7 +25,7 @@
 */
 
 class ApiController extends Controller {
-	private $writeTokenCacheTime = 43200; // 12 hours
+	protected $writeTokenCacheTime = 43200; // 12 hours
 	
 	private $profile = false;
 	private $profileShard = 0;
@@ -152,7 +152,7 @@ class ApiController extends Controller {
 				
 				// Check Zotero-Write-Token if it exists to make sure
 				// this isn't a duplicate request
-				if ($this->method == 'POST' || $this->method == 'PUT') {
+				if ($this->isWriteMethod()) {
 					if ($cacheKey = $this->getWriteTokenCacheKey()) {
 						if (Z_Core::$MC->get($cacheKey)) {
 							$this->e412("Write token already used");
@@ -163,6 +163,10 @@ class ApiController extends Controller {
 			// Website cookie authentication
 			else if (!empty($_COOKIE) && !empty($_GET['session']) &&
 					($this->userID = Zotero_Users::getUserIDFromSession($_COOKIE, $_GET['session']))) {
+				// Users who haven't synced may not exist in our DB
+				if (!Zotero_Users::exists($this->userID)) {
+					Zotero_Users::add($this->userID);
+				}
 				$this->grantUserPermissions($this->userID);
 				$this->cookieAuth = true;
 			}
@@ -275,7 +279,9 @@ class ApiController extends Controller {
 				: false
 		);
 		
-		header("Zotero-API-Version: " . $this->queryParams['apiVersion']);
+		$version = $this->queryParams['apiVersion'];
+		header("Zotero-API-Version: " . $version);
+		StatsD::increment("api.request.version.v" . $version, 0.25);
 	}
 	
 	
@@ -399,7 +405,7 @@ class ApiController extends Controller {
 	 */
 	protected function checkObjectIfUnmodifiedSinceVersion($object, $required=false) {
 		$objectType = Zotero_Utilities::getObjectTypeFromObject($object);
-		if (!in_array($objectType, array('item', 'collection', 'search'))) {
+		if (!in_array($objectType, array('item', 'collection', 'search', 'setting'))) {
 			throw new Exception("Invalid object type");
 		}
 		
@@ -428,7 +434,7 @@ class ApiController extends Controller {
 		}
 		// If-Unmodified-Since-Version
 		else {
-			if (empty($_SERVER['HTTP_IF_UNMODIFIED_SINCE_VERSION'])) {
+			if (!isset($_SERVER['HTTP_IF_UNMODIFIED_SINCE_VERSION'])) {
 				if ($required) {
 					$this->e428("If-Unmodified-Since-Version must be provided for write requests");
 				}
@@ -504,14 +510,14 @@ class ApiController extends Controller {
 				&& $this->permissions->canAccess($this->objectLibraryID)
 				&& Zotero_Libraries::getVersion($this->objectLibraryID)
 					<= $_SERVER['HTTP_IF_MODIFIED_SINCE_VERSION']) {
-			$this->e304("Library has not been modified");
+			$this->e304();
 		}
 	}
 	
 	
 	protected function requireContentType($contentType) {
 		if ($_SERVER['CONTENT_TYPE'] != $contentType) {
-			throw new Exception("Content-Type must be '$contentType'", Z_ERROR_INVALID_INPUT);
+			throw new Exception("Content-Type must be $contentType", Z_ERROR_INVALID_INPUT);
 		}
 	}
 	
@@ -768,6 +774,8 @@ class ApiController extends Controller {
 	protected function jsonDecode($json) {
 		$obj = json_decode($json);
 		
+		Zotero_Utilities::cleanStringRecursive($obj);
+		
 		switch(json_last_error()) {
 			case JSON_ERROR_DEPTH:
 				$error = 'Maximum stack depth exceeded';
@@ -854,6 +862,11 @@ class ApiController extends Controller {
 	
 	
 	public function logTotalRequestTime() {
+		if (!Z_CONFIG::$STATSD_ENABLED) {
+			return;
+		}
+		
+		StatsD::timing("api.memcached", Z_Core::$MC->requestTime * 1000, 0.25);
 		StatsD::timing("api.request.total", (microtime(true) - $this->startTime) * 1000, 0.25);
 	}
 }

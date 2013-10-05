@@ -31,7 +31,8 @@ class Zotero_DataObjects {
 		'collection' => array('singular'=>'Collection', 'plural'=>'Collections'),
 		'search' => array('singular'=>'Search', 'plural'=>'Searches'),
 		'tag' => array('singular'=>'Tag', 'plural'=>'Tags'),
-		'relation' => array('singular'=>'Relation', 'plural'=>'Relations')
+		'relation' => array('singular'=>'Relation', 'plural'=>'Relations'),
+		'setting' => array('singular'=>'Setting', 'plural'=>'Settings')
 	);
 	
 	protected static $ZDO_object = '';
@@ -39,7 +40,9 @@ class Zotero_DataObjects {
 	protected static $ZDO_Object = '';
 	protected static $ZDO_Objects = '';
 	protected static $ZDO_id = '';
+	protected static $ZDO_key = '';
 	protected static $ZDO_table = '';
+	protected static $ZDO_timestamp = '';
 	
 	private static $cacheVersion = 3;
 	
@@ -68,8 +71,14 @@ class Zotero_DataObjects {
 			case 'id':
 				return static::$ZDO_id ? static::$ZDO_id : static::$ZDO_object . 'ID';
 			
+			case 'key':
+				return static::$ZDO_key ? static::$ZDO_key : 'key';
+			
 			case 'table':
 				return static::$ZDO_table ? static::$ZDO_table : static::field('objects');
+			
+			case 'timestamp':
+				return static::$ZDO_timestamp ? static::$ZDO_timestamp : 'serverDateModified';
 		}
 	}
 	
@@ -127,6 +136,13 @@ class Zotero_DataObjects {
 				$className = "Zotero_" . ucwords($types);
 				return call_user_func(array($className, 'get'), $libraryID, self::$primaryDataByKey[$type][$libraryID][$key]['id'], true);
 			
+			case 'setting':
+				$className = "Zotero_" . ucwords($type);
+				$obj = new $className;
+				$obj->libraryID = $libraryID;
+				$obj->name = $key;
+				return $obj;
+			
 			default:
 				$className = "Zotero_" . ucwords($type);
 				$obj = new $className;
@@ -148,6 +164,11 @@ class Zotero_DataObjects {
 		
 		if ($type == 'relation') {
 			if (!preg_match('/[a-f0-9]{32}/', $key)) {
+				throw new Exception("Invalid key '$key'");
+			}
+		}
+		else if ($type == 'setting') {
+			if (!preg_match('/[a-zA-Z0-9]{1,1000}/', $key)) {
 				throw new Exception("Invalid key '$key'");
 			}
 		}
@@ -184,6 +205,7 @@ class Zotero_DataObjects {
 	
 	public static function getPrimaryDataByKey($libraryID, $key) {
 		$type = static::field('object');
+		$keyField = static::field('key');
 		
 		if (!is_numeric($libraryID)) {
 			throw new Exception("Invalid libraryID '$libraryID'");
@@ -193,7 +215,7 @@ class Zotero_DataObjects {
 				throw new Exception("Invalid key '$key'");
 			}
 		}
-		else if (!preg_match('/[A-Z0-9]{8}/', $key)) {
+		else if (!preg_match('/[A-Z0-9]{8}/', $key) && $type != 'setting') {
 			throw new Exception("Invalid key '$key'");
 		}
 		
@@ -206,7 +228,7 @@ class Zotero_DataObjects {
 				. "MD5(CONCAT(subject, '_', predicate, '_', object))=?";
 		}
 		else {
-			$sql = self::getPrimaryDataSQL() . "libraryID=? AND `key`=?";
+			$sql = self::getPrimaryDataSQL() . "libraryID=? AND `$keyField`=?";
 		}
 		$row = Zotero_DB::rowQuery(
 			$sql, array($libraryID, $key), Zotero_Shards::getByLibraryID($libraryID)
@@ -220,6 +242,7 @@ class Zotero_DataObjects {
 	
 	public static function cachePrimaryData($row, $libraryID=false, $key=false, $id=false) {
 		$type = static::field('object');
+		$keyField = static::field('key');
 		
 		if (!$row && (!$libraryID || !($key || $id))) {
 			throw new Exception("libraryID and either key or id must be set if row is empty");
@@ -249,8 +272,10 @@ class Zotero_DataObjects {
 				throw new Exception("$found $type primary data fields provided -- expected $expected");
 			}
 			
-			self::$primaryDataByKey[$type][$libraryID][$row['key']] = $row;
-			self::$primaryDataByID[$type][$libraryID][$row['id']] =& self::$primaryDataByKey[$type][$libraryID][$row['key']];
+			self::$primaryDataByKey[$type][$libraryID][$row[$keyField]] = $row;
+			if (isset($row['id'])) {
+				self::$primaryDataByID[$type][$libraryID][$row['id']] =& self::$primaryDataByKey[$type][$libraryID][$row['key']];
+			}
 		}
 		else if ($key) {
 			self::$primaryDataByKey[$type][$libraryID][$key] = false;
@@ -265,9 +290,11 @@ class Zotero_DataObjects {
 		$type = static::field('object');
 		
 		if (isset(self::$primaryDataByKey[$type][$libraryID][$key])) {
-			$id = self::$primaryDataByKey[$type][$libraryID][$key]['id'];
+			if (isset(self::$primaryDataByKey[$type][$libraryID][$key]['id'])) {
+				$id = self::$primaryDataByKey[$type][$libraryID][$key]['id'];
+				unset(self::$primaryDataByID[$type][$libraryID][$id]);
+			}
 			unset(self::$primaryDataByKey[$type][$libraryID][$key]);
-			unset(self::$primaryDataByID[$type][$libraryID][$id]);
 		}
 	}
 	
@@ -339,6 +366,7 @@ class Zotero_DataObjects {
 		$id = static::field('id');
 		$type = static::field('object');
 		$types = static::field('objects');
+		$timestampCol = static::field('timestamp');
 		
 		// All joined groups have to be checked
 		$joinedGroupIDs = Zotero_Groups::getJoined($userID, $timestamp);
@@ -381,7 +409,7 @@ class Zotero_DataObjects {
 			if ($libraryIDs['updated']) {
 				$sql .= "(libraryID IN (" .  implode(', ', array_fill(0, sizeOf($libraryIDs['updated']), '?')) . ")";
 				$params = $libraryIDs['updated'];
-				$sql .= " AND serverDateModified >= FROM_UNIXTIME(?))";
+				$sql .= " AND $timestampCol >= FROM_UNIXTIME(?))";
 				$params[] = $timestamp;
 			}
 			
@@ -459,7 +487,7 @@ class Zotero_DataObjects {
 			throw new Exception("Function not valid for $type");
 		}
 		
-		static::validateMultiObjectJSON($types, $json, $requestParams);
+		static::validateMultiObjectJSON($json, $requestParams);
 		
 		$results = new Zotero_Results;
 		
@@ -536,7 +564,9 @@ class Zotero_DataObjects {
 	}
 	
 	
-	protected static function validateMultiObjectJSON($objectTypePlural, $json, $requestParams) {
+	protected static function validateMultiObjectJSON($json, $requestParams) {
+		$objectTypePlural = static::field('objects');
+		
 		if (!is_object($json)) {
 			throw new Exception('$json must be a decoded JSON object');
 		}
@@ -572,6 +602,7 @@ class Zotero_DataObjects {
 		$id = static::field('id');
 		$type = static::field('object');
 		$types = static::field('objects');
+		$keyField = static::field('key');
 		
 		if (!$key) {
 			throw new Exception("Invalid key $key");
@@ -621,7 +652,7 @@ class Zotero_DataObjects {
 			$deleted = Zotero_DB::query($sql, array($libraryID, $key), $shardID);
 		}
 		else {
-			$sql = "DELETE FROM $table WHERE libraryID=? AND `key`=?";
+			$sql = "DELETE FROM $table WHERE libraryID=? AND `$keyField`=?";
 			$deleted = Zotero_DB::query($sql, array($libraryID, $key), $shardID);
 		}
 		
@@ -659,12 +690,18 @@ class Zotero_DataObjects {
 	 * @param	SimpleXMLElement	$xml		Data necessary for delete as SimpleXML element
 	 * @return	void
 	 */
-	public static function deleteFromXML(SimpleXMLElement $xml) {
+	public static function deleteFromXML(SimpleXMLElement $xml, $userID) {
 		$parents = array();
 		
 		foreach ($xml->children() as $obj) {
 			$libraryID = (int) $obj['libraryID'];
 			$key = (string) $obj['key'];
+			
+			if ($userID && !Zotero_Libraries::userCanEdit($libraryID, $userID)) {
+				throw new Exception("Cannot edit " . static::field('object')
+					. " in library $obj->libraryID", Z_ERROR_LIBRARY_ACCESS_DENIED);
+			}
+			
 			if ($obj->getName() == 'item') {
 				$item = Zotero_Items::getByLibraryAndKey($libraryID, $key);
 				if (!$item) {
@@ -684,57 +721,15 @@ class Zotero_DataObjects {
 	}
 	
 	
-	public static function isEditable($obj) {
-		$type = static::field('object');
-		
-		// Only enforce for sync controller for now
-		if (empty($GLOBALS['controller']) || !($GLOBALS['controller'] instanceof SyncController)) {
-			return true;
-		}
-		
-		// Make sure user has access privileges to delete
-		$userID = $GLOBALS['controller']->userID;
+	
+	public static function editCheck($obj, $userID=false) {
 		if (!$userID) {
 			return true;
 		}
 		
-		$objectLibraryID = $obj->libraryID;
-		
-		$libraryType = Zotero_Libraries::getType($objectLibraryID);
-		switch ($libraryType) {
-			case 'user':
-				if (!empty($GLOBALS['controller']->userLibraryID)) {
-					$userLibraryID = $GLOBALS['controller']->userLibraryID;
-				}
-				else {
-					$userLibraryID = Zotero_Users::getLibraryIDFromUserID($userID);
-				}
-				if ($objectLibraryID != $userLibraryID) {
-					return false;
-				}
-				return true;
-			
-			case 'group':
-				$groupID = Zotero_Groups::getGroupIDFromLibraryID($objectLibraryID);
-				$group = Zotero_Groups::get($groupID);
-				if (!$group->hasUser($userID) || !$group->userCanEdit($userID)) {
-					return false;
-				}
-				
-				if ($type == 'item' && $obj->isImportedAttachment() && !$group->userCanEditFiles($userID)) {
-					return false;
-				}
-				return true;
-			
-			default:
-				throw new Exception("Unsupported library type '$libraryType'");
-		}
-	}
-	
-	
-	public static function editCheck($obj) {
-		if (!static::isEditable($obj)) {
-			throw new Exception("Cannot edit " . static::field('object') . " in library $obj->libraryID", Z_ERROR_LIBRARY_ACCESS_DENIED);
+		if (!Zotero_Libraries::userCanEdit($obj->libraryID, $userID, $obj)) {
+			throw new Exception("Cannot edit " . static::field('object')
+				. " in library $obj->libraryID", Z_ERROR_LIBRARY_ACCESS_DENIED);
 		}
 	}
 }
