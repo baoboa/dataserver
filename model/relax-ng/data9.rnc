@@ -91,7 +91,7 @@ start =
 			element related {
 				keys
 			}?
-		}+
+		}*
 	}?
 	& element creators {
 		element creator {
@@ -112,7 +112,7 @@ start =
 				)
 			),
 			element birthYear { xsd:integer }?
-		}+
+		}*
 	}?
 	& element collections {
 		element collection {
@@ -180,6 +180,18 @@ start =
 		element setting {
 			libraryID,
 			attribute name { text },
+			attribute version { xsd:integer }?,
+			text
+		}+
+	}?
+	& element fulltexts {
+		element fulltext {
+			libraryID,
+			key,
+			attribute indexedChars { xsd:integer },
+			attribute totalChars { xsd:integer },
+			attribute indexedPages { xsd:integer },
+			attribute totalPages { xsd:integer },
 			attribute version { xsd:integer }?,
 			text
 		}+

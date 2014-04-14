@@ -29,11 +29,6 @@ require('ApiController.php');
 class FullTextController extends ApiController {
 	public function __construct($controllerName, $action, $params) {
 		parent::__construct($controllerName, $action, $params);
-		
-		// Only available on testing site for now
-		if (!Z_ENV_TESTING_SITE) {
-			$this->e404();
-		}
 	}
 	
 	
@@ -48,6 +43,8 @@ class FullTextController extends ApiController {
 			$this->objectLibraryID, $this->queryParams['newer']
 		);
 		
+		$this->libraryVersion = Zotero_Libraries::getVersion($this->objectLibraryID);
+		
 		if ($this->queryParams['pprint']) {
 			header("Content-Type: text/plain");
 		}
@@ -60,7 +57,7 @@ class FullTextController extends ApiController {
 	
 	
 	public function itemContent() {
-		$this->allowMethods(array('GET', 'PUT', 'DELETE'));
+		$this->allowMethods(array('GET', 'PUT'));
 		
 		// Check for general library access
 		if (!$this->permissions->canAccess($this->objectLibraryID)) {
@@ -99,29 +96,46 @@ class FullTextController extends ApiController {
 			$this->libraryVersion = Zotero_Libraries::getUpdatedVersion($this->objectLibraryID);
 			
 			if ($this->method == 'PUT') {
-				$this->requireContentType("text/plain");
+				$this->requireContentType("application/json");
 				
-				Zotero_FullText::indexItem($item, $this->body);
-			}
-			else if ($this->method == 'DELETE') {
-				$deleted = Zotero_FullText::deleteItemContent($item);
-				if (!$deleted) {
-					$this->e404();
+				$json = json_decode($this->body, true);
+				if (!$json) {
+					$this->e400("PUT data is not valid JSON");
 				}
+				$stats = [];
+				foreach (Zotero_FullText::$metadata as $prop) {
+					if (isset($json[$prop])) {
+						$stats[$prop] = $json[$prop];
+					}
+				}
+				Zotero_FullText::indexItem($item, $json['content'], $stats);
 				$this->e204();
 			}
 			else {
-				$this->e501();
+				$this->e405();
 			}
 		}
 		else {
-			$data = Zotero_FullText::getItemData($item);
+			$data = Zotero_FullText::getItemData($item->libraryID, $item->key);
 			if (!$data) {
 				$this->e404();
 			}
 			$this->libraryVersion = $data['version'];
-			header("Content-Type: text/plain; charset=UTF-8");
-			echo $data['content'];
+			if ($this->queryParams['pprint']) {
+				header("Content-Type: text/plain");
+			}
+			else {
+				header("Content-Type: application/json");
+			}
+			$json = [
+				"content" => $data['content']
+			];
+			foreach (Zotero_FullText::$metadata as $prop) {
+				if (!empty($data[$prop])) {
+					$json[$prop] = $data[$prop];
+				}
+			}
+			echo Zotero_Utilities::formatJSON($json, $this->queryParams['pprint']);
 		}
 		
 		$this->end();

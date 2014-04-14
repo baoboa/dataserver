@@ -433,14 +433,131 @@ class ItemTests extends APITests {
 	
 	
 	public function testEditTopLevelNote() {
-		$xml = API::createNoteItem("Test", null, $this, 'atom');
+		$noteText = "Test";
+		
+		$xml = API::createNoteItem($noteText, null, $this, 'atom');
 		$data = API::parseDataFromAtomEntry($xml);
+		$json = json_decode($data['content'], true);
+		$noteText .= " Test";
+		$json['note'] = $noteText;
 		$response = API::userPut(
 			self::$config['userID'],
 			"items/{$data['key']}?key=" . self::$config['apiKey'],
-			$data['content']
+			json_encode($json)
 		);
 		$this->assert204($response);
+		
+		$response = API::userGet(
+			self::$config['userID'],
+			"items/{$data['key']}?key=" . self::$config['apiKey'] . "&content=json"
+		);
+		$this->assert200($response);
+		$xml = API::getXMLFromResponse($response);
+		$data = API::parseDataFromAtomEntry($xml);
+		$json = json_decode($data['content'], true);
+		$this->assertEquals($noteText, $json['note']);
+	}
+	
+	
+	public function testEditChildNote() {
+		$noteText = "Test";
+		$key = API::createItem("book", [ "title" => "Test" ], $this, 'key');
+		$xml = API::createNoteItem($noteText, $key, $this, 'atom');
+		$data = API::parseDataFromAtomEntry($xml);
+		$json = json_decode($data['content'], true);
+		$noteText .= " Test";
+		$json['note'] = $noteText;
+		$response = API::userPut(
+			self::$config['userID'],
+			"items/{$data['key']}?key=" . self::$config['apiKey'],
+			json_encode($json)
+		);
+		$this->assert204($response);
+		
+		$response = API::userGet(
+			self::$config['userID'],
+			"items/{$data['key']}?key=" . self::$config['apiKey'] . "&content=json"
+		);
+		$this->assert200($response);
+		$xml = API::getXMLFromResponse($response);
+		$data = API::parseDataFromAtomEntry($xml);
+		$json = json_decode($data['content'], true);
+		$this->assertEquals($noteText, $json['note']);
+	}
+	
+	
+	public function testEditTitleWithCollectionInMultipleMode() {
+		$collectionKey = API::createCollection('Test', false, $this, 'key');
+		
+		$xml = API::createItem("book", [
+			"title" => "A",
+			"collections" => [
+				$collectionKey
+			]
+		], $this, 'atom');
+		
+		$data = API::parseDataFromAtomEntry($xml);
+		$data = json_decode($data['content'], true);
+		$version = $data['itemVersion'];
+		$data['title'] = "B";
+		
+		$response = API::userPost(
+			self::$config['userID'],
+			"items?key=" . self::$config['apiKey'],
+			json_encode([
+				"items" => [$data]
+			])
+		);
+		$this->assert200ForObject($response);
+		
+		$xml = API::getItemXML($data['itemKey']);
+		$data = API::parseDataFromAtomEntry($xml);
+		$json = json_decode($data['content'], true);
+		$this->assertEquals("B", $json['title']);
+		$this->assertGreaterThan($version, $json['itemVersion']);
+	}
+	
+	
+	public function testEditTitleWithTagInMultipleMode() {
+		$tag1 = [
+			"tag" => "foo",
+			"type" => 1
+		];
+		$tag2 = [
+			"tag" => "bar"
+		];
+		
+		$xml = API::createItem("book", [
+			"title" => "A",
+			"tags" => [$tag1]
+		], $this, 'atom');
+		
+		$data = API::parseDataFromAtomEntry($xml);
+		$json = json_decode($data['content'], true);
+		$this->assertCount(1, $json['tags']);
+		$this->assertEquals($tag1, $json['tags'][0]);
+		
+		$version = $json['itemVersion'];
+		$json['title'] = "B";
+		$json['tags'][] = $tag2;
+		
+		$response = API::userPost(
+			self::$config['userID'],
+			"items?key=" . self::$config['apiKey'],
+			json_encode([
+				"items" => [$json]
+			])
+		);
+		$this->assert200ForObject($response);
+		
+		$xml = API::getItemXML($json['itemKey']);
+		$data = API::parseDataFromAtomEntry($xml);
+		$json = json_decode($data['content'], true);
+		$this->assertEquals("B", $json['title']);
+		$this->assertGreaterThan($version, $json['itemVersion']);
+		$this->assertCount(2, $json['tags']);
+		$this->assertContains($tag1, $json['tags']);
+		$this->assertContains($tag2, $json['tags']);
 	}
 	
 	
@@ -481,14 +598,14 @@ class ItemTests extends APITests {
 	
 	public function testNewEmptyLinkAttachmentItem() {
 		$key = API::createItem("book", false, $this, 'key');
-		$xml = API::createAttachmentItem("linked_url", $key, $this, 'atom');
+		$xml = API::createAttachmentItem("linked_url", [], $key, $this, 'atom');
 		return API::parseDataFromAtomEntry($xml);
 	}
 	
 	
 	public function testNewEmptyLinkAttachmentItemWithItemKey() {
 		$key = API::createItem("book", false, $this, 'key');
-		$xml = API::createAttachmentItem("linked_url", $key, $this, 'atom');
+		$xml = API::createAttachmentItem("linked_url", [], $key, $this, 'atom');
 		
 		$response = API::get("items/new?itemType=attachment&linkMode=linked_url");
 		$json = json_decode($response->getBody());
@@ -512,14 +629,14 @@ class ItemTests extends APITests {
 	
 	public function testNewEmptyImportedURLAttachmentItem() {
 		$key = API::createItem("book", false, $this, 'key');
-		$xml = API::createAttachmentItem("imported_url", $key, $this, 'atom');
+		$xml = API::createAttachmentItem("imported_url", [], $key, $this, 'atom');
 		return API::parseDataFromAtomEntry($xml);
 	}
 	
 	
 	public function testEditEmptyLinkAttachmentItem() {
 		$key = API::createItem("book", false, $this, 'key');
-		$xml = API::createAttachmentItem("linked_url", $key, $this, 'atom');
+		$xml = API::createAttachmentItem("linked_url", [], $key, $this, 'atom');
 		$data = API::parseDataFromAtomEntry($xml);
 		
 		$key = $data['key'];
@@ -605,7 +722,7 @@ class ItemTests extends APITests {
 	
 	
 	public function testEditAttachmentUpdatedTimestamp() {
-		$xml = API::createAttachmentItem("linked_file", false, $this);
+		$xml = API::createAttachmentItem("linked_file", [], false, $this);
 		$data = API::parseDataFromAtomEntry($xml);
 		$atomUpdated = (string) array_shift($xml->xpath('//atom:entry/atom:updated'));
 		$json = json_decode($data['content'], true);
@@ -708,7 +825,7 @@ class ItemTests extends APITests {
 			self::$config['ownedPrivateGroupID'], "book", $this, 'key'
 		);
 		$xml = API::groupCreateAttachmentItem(
-			self::$config['ownedPrivateGroupID'], "imported_url", $key, $this
+			self::$config['ownedPrivateGroupID'], "imported_url", [], $key, $this
 		);
 		return API::parseDataFromAtomEntry($xml);
 	}
@@ -784,7 +901,7 @@ class ItemTests extends APITests {
 		$data = API::parseDataFromAtomEntry($xml);
 		$key = $data['key'];
 		
-		API::createAttachmentItem("linked_url", $key, $this, 'key');
+		API::createAttachmentItem("linked_url", [], $key, $this, 'key');
 		
 		$response = API::userGet(
 			self::$config['userID'],
@@ -804,6 +921,306 @@ class ItemTests extends APITests {
 	}
 	
 	
+	public function testTop() {
+		API::userClear(self::$config['userID']);
+		
+		$collectionKey = API::createCollection('Test', false, $this, 'key');
+		
+		$parentTitle1 = "Parent Title";
+		$childTitle1 = "This is a Test Title";
+		$parentTitle2 = "Another Parent Title";
+		$parentTitle3 = "Yet Another Parent Title";
+		$noteText = "This is a sample note.";
+		$parentTitleSearch = "title";
+		$childTitleSearch = "test";
+		$dates = ["2013", "January 3, 2010", ""];
+		$orderedDates = [$dates[2], $dates[1], $dates[0]];
+		$itemTypes = ["journalArticle", "newspaperArticle", "book"];
+		
+		$parentKeys = [];
+		$childKeys = [];
+		
+		$parentKeys[] = API::createItem($itemTypes[0], [
+			'title' => $parentTitle1,
+			'date' => $dates[0],
+			'collections' => [
+				$collectionKey
+			]
+		], $this, 'key');
+		$childKeys[] = API::createAttachmentItem("linked_url", [
+			'title' => $childTitle1
+		], $parentKeys[0], $this, 'key');
+		
+		$parentKeys[] = API::createItem($itemTypes[1], [
+			'title' => $parentTitle2,
+			'date' => $dates[1]
+		], $this, 'key');
+		$childKeys[] = API::createNoteItem($noteText, $parentKeys[1], $this, 'key');
+		
+		// Create item with deleted child that matches child title search
+		$parentKeys[] = API::createItem($itemTypes[2], [
+			'title' => $parentTitle3
+		], $this, 'key');
+		API::createAttachmentItem("linked_url", [
+			'title' => $childTitle1,
+			'deleted' => true
+		], $parentKeys[sizeOf($parentKeys) - 1], $this, 'key');
+		
+		// Add deleted item with non-deleted child
+		$deletedKey = API::createItem("book", [
+			'title' => "This is a deleted item",
+			'deleted' => true
+		], $this, 'key');
+		API::createNoteItem("This is a child note of a deleted item.", $deletedKey, $this, 'key');
+		
+		// /top, Atom
+		$response = API::userGet(
+			self::$config['userID'],
+			"items/top?key=" . self::$config['apiKey'] . "&content=json"
+		);
+		$this->assert200($response);
+		$this->assertNumResults(sizeOf($parentKeys), $response);
+		$xml = API::getXMLFromResponse($response);
+		$xpath = $xml->xpath('//atom:entry/zapi:key');
+		$this->assertCount(sizeOf($parentKeys), $xpath);
+		foreach ($parentKeys as $parentKey) {
+			$this->assertContains($parentKey, $xpath);
+		}
+		
+		// /top, Atom, in collection
+		$response = API::userGet(
+			self::$config['userID'],
+			"collections/$collectionKey/items/top?key=" . self::$config['apiKey'] . "&content=json"
+		);
+		$this->assert200($response);
+		$this->assertNumResults(1, $response);
+		$xml = API::getXMLFromResponse($response);
+		$xpath = $xml->xpath('//atom:entry/zapi:key');
+		$this->assertCount(1, $xpath);
+		$this->assertContains($parentKeys[0], $xpath);
+		
+		// /top, keys
+		$response = API::userGet(
+			self::$config['userID'],
+			"items/top?key=" . self::$config['apiKey'] . "&format=keys"
+		);
+		$this->assert200($response);
+		$keys = explode("\n", trim($response->getBody()));
+		$this->assertCount(sizeOf($parentKeys), $keys);
+		foreach ($parentKeys as $parentKey) {
+			$this->assertContains($parentKey, $keys);
+		}
+		
+		// /top, keys, in collection
+		$response = API::userGet(
+			self::$config['userID'],
+			"collections/$collectionKey/items/top?key=" . self::$config['apiKey'] . "&format=keys"
+		);
+		$this->assert200($response);
+		$this->assertEquals($parentKeys[0], trim($response->getBody()));
+		
+		// /top with itemKey for parent, Atom
+		$response = API::userGet(
+			self::$config['userID'],
+			"items/top?key=" . self::$config['apiKey'] . "&content=json&itemKey=" . $parentKeys[0]
+		);
+		$this->assert200($response);
+		$this->assertNumResults(1, $response);
+		$xml = API::getXMLFromResponse($response);
+		$xpath = $xml->xpath('//atom:entry/zapi:key');
+		$this->assertEquals($parentKeys[0], (string) array_shift($xpath));
+		
+		// /top with itemKey for parent, Atom, in collection
+		$response = API::userGet(
+			self::$config['userID'],
+			"collections/$collectionKey/items/top?key=" . self::$config['apiKey']
+				. "&content=json&itemKey=" . $parentKeys[0]
+		);
+		$this->assert200($response);
+		$this->assertNumResults(1, $response);
+		$xml = API::getXMLFromResponse($response);
+		$xpath = $xml->xpath('//atom:entry/zapi:key');
+		$this->assertEquals($parentKeys[0], (string) array_shift($xpath));
+		
+		// /top with itemKey for parent, keys
+		$response = API::userGet(
+			self::$config['userID'],
+			"items/top?key=" . self::$config['apiKey'] . "&format=keys&itemKey=" . $parentKeys[0]
+		);
+		$this->assert200($response);
+		$this->assertEquals($parentKeys[0], trim($response->getBody()));
+		
+		// /top with itemKey for parent, keys, in collection
+		$response = API::userGet(
+			self::$config['userID'],
+			"collections/$collectionKey/items/top?key=" . self::$config['apiKey']
+				. "&format=keys&itemKey=" . $parentKeys[0]
+		);
+		$this->assert200($response);
+		$this->assertEquals($parentKeys[0], trim($response->getBody()));
+		
+		// /top with itemKey for child, Atom
+		$response = API::userGet(
+			self::$config['userID'],
+			"items/top?key=" . self::$config['apiKey'] . "&content=json&itemKey=" . $childKeys[0]
+		);
+		$this->assert200($response);
+		$this->assertNumResults(1, $response);
+		$xml = API::getXMLFromResponse($response);
+		$xpath = $xml->xpath('//atom:entry/zapi:key');
+		$this->assertEquals($parentKeys[0], (string) array_shift($xpath));
+		
+		// /top with itemKey for child, keys
+		$response = API::userGet(
+			self::$config['userID'],
+			"items/top?key=" . self::$config['apiKey'] . "&format=keys&itemKey=" . $childKeys[0]
+		);
+		$this->assert200($response);
+		$this->assertEquals($parentKeys[0], trim($response->getBody()));
+		
+		// /top, Atom, with q for all items
+		$response = API::userGet(
+			self::$config['userID'],
+			"items/top?key=" . self::$config['apiKey'] . "&content=json&q=$parentTitleSearch"
+		);
+		$this->assert200($response);
+		$this->assertNumResults(sizeOf($parentKeys), $response);
+		$xml = API::getXMLFromResponse($response);
+		$xpath = $xml->xpath('//atom:entry/zapi:key');
+		$this->assertCount(sizeOf($parentKeys), $xpath);
+		foreach ($parentKeys as $parentKey) {
+			$this->assertContains($parentKey, $xpath);
+		}
+		
+		// /top, Atom, in collection, with q for all items
+		$response = API::userGet(
+			self::$config['userID'],
+			"collections/$collectionKey/items/top?key=" . self::$config['apiKey']
+				. "&content=json&q=$parentTitleSearch"
+		);
+		$this->assert200($response);
+		$this->assertNumResults(1, $response);
+		$xml = API::getXMLFromResponse($response);
+		$xpath = $xml->xpath('//atom:entry/zapi:key');
+		$this->assertCount(1, $xpath);
+		$this->assertContains($parentKeys[0], $xpath);
+		
+		// /top, Atom, with q for child item
+		$response = API::userGet(
+			self::$config['userID'],
+			"items/top?key=" . self::$config['apiKey'] . "&content=json&q=$childTitleSearch"
+		);
+		$this->assert200($response);
+		$this->assertNumResults(1, $response);
+		$xml = API::getXMLFromResponse($response);
+		$xpath = $xml->xpath('//atom:entry/zapi:key');
+		$this->assertCount(1, $xpath);
+		$this->assertContains($parentKeys[0], $xpath);
+		
+		// /top, Atom, in collection, with q for child item
+		$response = API::userGet(
+			self::$config['userID'],
+			"collections/$collectionKey/items/top?key=" . self::$config['apiKey']
+				. "&content=json&q=$childTitleSearch"
+		);
+		$this->assert200($response);
+		$this->assertNumResults(0, $response);
+		// Not currently possible
+		/*$this->assertNumResults(1, $response);
+		$xml = API::getXMLFromResponse($response);
+		$xpath = $xml->xpath('//atom:entry/zapi:key');
+		$this->assertCount(1, $xpath);
+		$this->assertContains($parentKeys[0], $xpath);*/
+		
+		// /top, Atom, with q for all items, ordered by title
+		$response = API::userGet(
+			self::$config['userID'],
+			"items/top?key=" . self::$config['apiKey'] . "&content=json&q=$parentTitleSearch"
+				. "&order=title"
+		);
+		$this->assert200($response);
+		$this->assertNumResults(sizeOf($parentKeys), $response);
+		$xml = API::getXMLFromResponse($response);
+		$xpath = $xml->xpath('//atom:entry/atom:title');
+		$this->assertCount(sizeOf($parentKeys), $xpath);
+		$orderedTitles = [$parentTitle1, $parentTitle2, $parentTitle3];
+		sort($orderedTitles);
+		$orderedResults = array_map(function ($val) {
+			return (string) $val;
+		}, $xpath);
+		$this->assertEquals($orderedTitles, $orderedResults);
+		
+		// /top, Atom, with q for all items, ordered by date asc
+		$response = API::userGet(
+			self::$config['userID'],
+			"items/top?key=" . self::$config['apiKey'] . "&content=json&q=$parentTitleSearch"
+				. "&order=date&sort=asc"
+		);
+		$this->assert200($response);
+		$this->assertNumResults(sizeOf($parentKeys), $response);
+		$xml = API::getXMLFromResponse($response);
+		$xpath = $xml->xpath('//atom:entry/atom:content');
+		$this->assertCount(sizeOf($parentKeys), $xpath);
+		$orderedResults = array_map(function ($val) {
+			return json_decode($val)->date;
+		}, $xpath);
+		$this->assertEquals($orderedDates, $orderedResults);
+		
+		// /top, Atom, with q for all items, ordered by date desc
+		$response = API::userGet(
+			self::$config['userID'],
+			"items/top?key=" . self::$config['apiKey'] . "&content=json&q=$parentTitleSearch"
+				. "&order=date&sort=desc"
+		);
+		$this->assert200($response);
+		$this->assertNumResults(sizeOf($parentKeys), $response);
+		$xml = API::getXMLFromResponse($response);
+		$xpath = $xml->xpath('//atom:entry/atom:content');
+		$this->assertCount(sizeOf($parentKeys), $xpath);
+		$orderedDatesReverse = array_reverse($orderedDates);
+		$orderedResults = array_map(function ($val) {
+			return json_decode($val)->date;
+		}, $xpath);
+		$this->assertEquals($orderedDatesReverse, $orderedResults);
+		
+		// /top, Atom, with q for all items, ordered by item type asc
+		$response = API::userGet(
+			self::$config['userID'],
+			"items/top?key=" . self::$config['apiKey'] . "&content=json&q=$parentTitleSearch"
+				. "&order=itemType"
+		);
+		$this->assert200($response);
+		$this->assertNumResults(sizeOf($parentKeys), $response);
+		$xml = API::getXMLFromResponse($response);
+		$xpath = $xml->xpath('//atom:entry/zapi:itemType');
+		$this->assertCount(sizeOf($parentKeys), $xpath);
+		$orderedItemTypes = $itemTypes;
+		sort($orderedItemTypes);
+		$orderedResults = array_map(function ($val) {
+			return (string) $val;
+		}, $xpath);
+		$this->assertEquals($orderedItemTypes, $orderedResults);
+		
+		// /top, Atom, with q for all items, ordered by item type desc
+		$response = API::userGet(
+			self::$config['userID'],
+			"items/top?key=" . self::$config['apiKey'] . "&content=json&q=$parentTitleSearch"
+				. "&order=itemType&sort=desc"
+		);
+		$this->assert200($response);
+		$this->assertNumResults(sizeOf($parentKeys), $response);
+		$xml = API::getXMLFromResponse($response);
+		$xpath = $xml->xpath('//atom:entry/zapi:itemType');
+		$this->assertCount(sizeOf($parentKeys), $xpath);
+		$orderedItemTypes = $itemTypes;
+		rsort($orderedItemTypes);
+		$orderedResults = array_map(function ($val) {
+			return (string) $val;
+		}, $xpath);
+		$this->assertEquals($orderedItemTypes, $orderedResults);
+	}
+	
+	
 	public function testParentItem() {
 		$xml = API::createItem("book", false, $this);
 		$data = API::parseDataFromAtomEntry($xml);
@@ -811,7 +1228,7 @@ class ItemTests extends APITests {
 		$parentKey = $data['key'];
 		$parentVersion = $data['version'];
 		
-		$xml = API::createAttachmentItem("linked_url", $parentKey, $this);
+		$xml = API::createAttachmentItem("linked_url", [], $parentKey, $this);
 		$data = API::parseDataFromAtomEntry($xml);
 		$json = json_decode($data['content'], true);
 		$childKey = $data['key'];
@@ -855,7 +1272,7 @@ class ItemTests extends APITests {
 		$parentKey = $data['key'];
 		$parentVersion = $data['version'];
 		
-		$xml = API::createAttachmentItem("linked_url", $parentKey, $this);
+		$xml = API::createAttachmentItem("linked_url", [], $parentKey, $this);
 		$data = API::parseDataFromAtomEntry($xml);
 		$json = json_decode($data['content'], true);
 		$childKey = $data['key'];
@@ -924,6 +1341,5 @@ class ItemTests extends APITests {
 			"items?key=" . self::$config['apiKey'] . "&content=json"
 		);
 		$this->assertContains('"title":"Tést"', $response->getBody());
-		echo($response->getBody());
 	}
 }

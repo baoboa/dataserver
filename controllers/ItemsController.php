@@ -568,8 +568,7 @@ class ItemsController extends ApiController {
 					// Delete items
 					else if ($this->method == 'DELETE') {
 						Zotero_DB::beginTransaction();
-						$itemKeys = explode(',', $this->queryParams['itemKey']);
-						foreach ($itemKeys as $itemKey) {
+						foreach ($this->queryParams['itemKey'] as $itemKey) {
 							Zotero_Items::delete($this->objectLibraryID, $itemKey);
 						}
 						Zotero_DB::commit();
@@ -600,7 +599,7 @@ class ItemsController extends ApiController {
 					$this->queryParams['itemIDs'] = $itemIDs;
 				}
 				if ($itemKeys) {
-					$this->queryParams['itemKey'] = implode(',', $itemKeys);
+					$this->queryParams['itemKey'] = $itemKeys;
 				}
 				$results = Zotero_Items::search(
 					$this->objectLibraryID,
@@ -698,7 +697,7 @@ class ItemsController extends ApiController {
 		// Use of HEAD method is deprecated after 2.0.8/2.1b1 due to
 		// compatibility problems with proxies and security software
 		if ($this->method == 'HEAD' || ($this->method == 'GET' && $this->fileMode == 'info')) {
-			$info = Zotero_S3::getLocalFileItemInfo($item);
+			$info = Zotero_Storage::getLocalFileItemInfo($item);
 			if (!$info) {
 				$this->e404();
 			}
@@ -714,32 +713,30 @@ class ItemsController extends ApiController {
 			header_remove("X-Powered-By");
 		}
 		
-		// File download/viewing
+		// File viewing/download
 		//
 		// TEMP: allow POST for snapshot viewing until using session auth
-		else if ($this->method == 'GET' || ($this->method == 'POST' && $this->fileView)) {
+		else if ($this->method == 'GET') {
+			// File viewing
 			if ($this->fileView) {
-				$info = Zotero_S3::getLocalFileItemInfo($item);
+				$info = Zotero_Storage::getLocalFileItemInfo($item);
 				if (!$info) {
 					$this->e404();
 				}
-				// For zip files, redirect to files domain
-				if ($info['zip']) {
-					$url = Zotero_Attachments::getTemporaryURL($item, !empty($_GET['int']));
-					if (!$url) {
-						$this->e500();
-					}
-					$this->redirect($url);
-					exit;
+				$url = Zotero_Attachments::getTemporaryURL($item, !empty($_GET['int']));
+				if (!$url) {
+					$this->e500();
 				}
+				$this->redirect($url);
+				exit;
 			}
 			
-			// For single files, redirect to S3
-			$url = Zotero_S3::getDownloadURL($item, 60);
+			// File download
+			$url = Zotero_Storage::getDownloadURL($item, 60);
 			if (!$url) {
 				$this->e404();
 			}
-			Zotero_S3::logDownload(
+			Zotero_Storage::logDownload(
 				$item,
 				// TODO: support anonymous download if necessary
 				$this->userID,
@@ -779,7 +776,7 @@ class ItemsController extends ApiController {
 					}
 					
 					if (!$item->attachmentStorageHash) {
-						$info = Zotero_S3::getLocalFileItemInfo($item);
+						$info = Zotero_Storage::getLocalFileItemInfo($item);
 						$this->e412("ETag set but file does not exist");
 					}
 					
@@ -847,12 +844,12 @@ class ItemsController extends ApiController {
 				
 				// Reject file if it would put account over quota
 				if ($group) {
-					$quota = Zotero_S3::getEffectiveUserQuota($group->ownerUserID);
-					$usage = Zotero_S3::getUserUsage($group->ownerUserID);
+					$quota = Zotero_Storage::getEffectiveUserQuota($group->ownerUserID);
+					$usage = Zotero_Storage::getUserUsage($group->ownerUserID);
 				}
 				else {
-					$quota = Zotero_S3::getEffectiveUserQuota($this->objectUserID);
-					$usage = Zotero_S3::getUserUsage($this->objectUserID);
+					$quota = Zotero_Storage::getEffectiveUserQuota($this->objectUserID);
+					$usage = Zotero_Storage::getUserUsage($this->objectUserID);
 				}
 				$total = $usage['total'];
 				$fileSizeMB = round($info->size / 1024 / 1024, 1);
@@ -864,7 +861,7 @@ class ItemsController extends ApiController {
 				Zotero_DB::beginTransaction();
 				
 				// See if file exists with this filename
-				$localInfo = Zotero_S3::getLocalFileInfo($info);
+				$localInfo = Zotero_Storage::getLocalFileInfo($info);
 				if ($localInfo) {
 					$storageFileID = $localInfo['storageFileID'];
 					
@@ -879,10 +876,10 @@ class ItemsController extends ApiController {
 				}
 				// If not found, see if there's a copy with a different name
 				else {
-					$oldStorageFileID = Zotero_S3::getFileByHash($info->hash, $info->zip);
+					$oldStorageFileID = Zotero_Storage::getFileByHash($info->hash, $info->zip);
 					if ($oldStorageFileID) {
 						// Verify file size
-						$localInfo = Zotero_S3::getFileInfoByID($oldStorageFileID);
+						$localInfo = Zotero_Storage::getFileInfoByID($oldStorageFileID);
 						if ($localInfo['size'] != $info->size) {
 							throw new Exception(
 								"Specified file size incorrect for duplicated file "
@@ -892,7 +889,7 @@ class ItemsController extends ApiController {
 						}
 						
 						// Create new file on S3 with new name
-						$storageFileID = Zotero_S3::duplicateFile(
+						$storageFileID = Zotero_Storage::duplicateFile(
 							$oldStorageFileID,
 							$info->filename,
 							$info->zip,
@@ -906,7 +903,7 @@ class ItemsController extends ApiController {
 				
 				// If we already have a file, add/update storageFileItems row and stop
 				if (!empty($storageFileID)) {
-					Zotero_S3::updateFileItemInfo($item, $storageFileID, $info, $this->httpAuth);
+					Zotero_Storage::updateFileItemInfo($item, $storageFileID, $info, $this->httpAuth);
 					Zotero_DB::commit();
 					
 					if ($this->httpAuth) {
@@ -923,10 +920,10 @@ class ItemsController extends ApiController {
 				Zotero_DB::commit();
 				
 				// Add request to upload queue
-				$uploadKey = Zotero_S3::queueUpload($this->userID, $info);
+				$uploadKey = Zotero_Storage::queueUpload($this->userID, $info);
 				// User over queue limit
 				if (!$uploadKey) {
-					header('Retry-After: ' . Zotero_S3::$uploadQueueTimeout);
+					header('Retry-After: ' . Zotero_Storage::$uploadQueueTimeout);
 					if ($this->httpAuth) {
 						$this->e413("Too many queued uploads");
 					}
@@ -937,11 +934,11 @@ class ItemsController extends ApiController {
 				
 				// Output XML for client requests (which use HTTP Auth)
 				if ($this->httpAuth) {
-					$params = Zotero_S3::generateUploadPOSTParams($item, $info, true);
+					$params = Zotero_Storage::generateUploadPOSTParams($item, $info, true);
 					
 					header('Content-Type: application/xml');
 					$xml = new SimpleXMLElement('<upload/>');
-					$xml->url = Zotero_S3::getUploadBaseURL();
+					$xml->url = Zotero_Storage::getUploadBaseURL();
 					$xml->key = $uploadKey;
 					foreach ($params as $key=>$val) {
 						$xml->params->$key = $val;
@@ -952,15 +949,15 @@ class ItemsController extends ApiController {
 				else {
 					if (!empty($_REQUEST['params']) && $_REQUEST['params'] == "1") {
 						$params = array(
-							"url" => Zotero_S3::getUploadBaseURL(),
+							"url" => Zotero_Storage::getUploadBaseURL(),
 							"params" => array()
 						);
-						foreach (Zotero_S3::generateUploadPOSTParams($item, $info) as $key=>$val) {
+						foreach (Zotero_Storage::generateUploadPOSTParams($item, $info) as $key=>$val) {
 							$params['params'][$key] = $val;
 						}
 					}
 					else {
-						$params = Zotero_S3::getUploadPOSTData($item, $info);
+						$params = Zotero_Storage::getUploadPOSTData($item, $info);
 					}
 					
 					$params['uploadKey'] = $uploadKey;
@@ -981,7 +978,7 @@ class ItemsController extends ApiController {
 					$this->e400("Upload key not provided");
 				}
 				
-				$info = Zotero_S3::getUploadInfo($uploadKey);
+				$info = Zotero_Storage::getUploadInfo($uploadKey);
 				if (!$info) {
 					$this->e400("Upload key not found");
 				}
@@ -992,17 +989,17 @@ class ItemsController extends ApiController {
 						throw new Exception("Algorithm not specified", Z_ERROR_INVALID_INPUT);
 					}
 					
-					$storageFileID = Zotero_S3::patchFile($item, $info, $_REQUEST['algorithm'], $this->body);
+					$storageFileID = Zotero_Storage::patchFile($item, $info, $_REQUEST['algorithm'], $this->body);
 				}
 				// Full upload
 				else {
-					$remoteInfo = Zotero_S3::getRemoteFileInfo($info);
+					$remoteInfo = Zotero_Storage::getRemoteFileInfo($info);
 					if (!$remoteInfo) {
 						error_log("Remote file {$info->hash}/{$info->filename} not found");
 						$this->e400("Remote file not found");
 					}
-					if ($remoteInfo['size'] != $info->size) {
-						error_log("Uploaded file size does not match ({$remoteInfo['size']} != {$info->size}) for file {$info->hash}/{$info->filename}");
+					if ($remoteInfo->size != $info->size) {
+						error_log("Uploaded file size does not match ({$remoteInfo->size} != {$info->size}) for file {$info->hash}/{$info->filename}");
 					}
 				}
 				
@@ -1014,18 +1011,18 @@ class ItemsController extends ApiController {
 				if (!isset($storageFileID)) {
 					// Check if file already exists, which can happen if two identical
 					// files are uploaded simultaneously
-					$fileInfo = Zotero_S3::getLocalFileInfo($info);
+					$fileInfo = Zotero_Storage::getLocalFileInfo($info);
 					if ($fileInfo) {
 						$storageFileID = $fileInfo['storageFileID'];
 					}
 					// If file doesn't exist, add it
 					else {
-						$storageFileID = Zotero_S3::addFile($info);
+						$storageFileID = Zotero_Storage::addFile($info);
 					}
 				}
-				Zotero_S3::updateFileItemInfo($item, $storageFileID, $info);
+				Zotero_Storage::updateFileItemInfo($item, $storageFileID, $info);
 				
-				Zotero_S3::logUpload($this->userID, $item, $uploadKey, IPAddress::getIP());
+				Zotero_Storage::logUpload($this->userID, $item, $uploadKey, IPAddress::getIP());
 				
 				Zotero_DB::commit();
 				
@@ -1046,12 +1043,12 @@ class ItemsController extends ApiController {
 				
 				$uploadKey = $_POST['update'];
 				
-				$info = Zotero_S3::getUploadInfo($uploadKey);
+				$info = Zotero_Storage::getUploadInfo($uploadKey);
 				if (!$info) {
 					$this->e400("Upload key not found");
 				}
 				
-				$remoteInfo = Zotero_S3::getRemoteFileInfo($info);
+				$remoteInfo = Zotero_Storage::getRemoteFileInfo($info);
 				if (!$remoteInfo) {
 					$this->e400("Remote file not found");
 				}
@@ -1068,17 +1065,17 @@ class ItemsController extends ApiController {
 				
 				// Check if file already exists, which can happen if two identical
 				// files are uploaded simultaneously
-				$fileInfo = Zotero_S3::getLocalFileInfo($info);
+				$fileInfo = Zotero_Storage::getLocalFileInfo($info);
 				if ($fileInfo) {
 					$storageFileID = $fileInfo['storageFileID'];
 				}
 				else {
-					$storageFileID = Zotero_S3::addFile($info);
+					$storageFileID = Zotero_Storage::addFile($info);
 				}
 				
-				Zotero_S3::updateFileItemInfo($item, $storageFileID, $info, true);
+				Zotero_Storage::updateFileItemInfo($item, $storageFileID, $info, true);
 				
-				Zotero_S3::logUpload($this->userID, $item, $uploadKey, IPAddress::getIP());
+				Zotero_Storage::logUpload($this->userID, $item, $uploadKey, IPAddress::getIP());
 				
 				Zotero_DB::commit();
 				

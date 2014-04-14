@@ -125,60 +125,136 @@ class Zotero_Items extends Zotero_DataObjects {
 		
 		// Pass a list of itemIDs, for when the initial search is done via SQL
 		$itemIDs = !empty($params['itemIDs']) ? $params['itemIDs'] : array();
-		$itemKeys = !empty($params['itemKey']) ? explode(',', $params['itemKey']) : array();
+		$itemKeys = $params['itemKey'];
 		
 		$titleSort = !empty($params['order']) && $params['order'] == 'title';
+		$parentItemSort = !empty($params['order'])
+			&& in_array($params['order'], ['itemType', 'dateAdded', 'dateModified', 'serverDateModified', 'addedBy']);
 		
 		$sql = "SELECT SQL_CALC_FOUND_ROWS DISTINCT ";
-		if ($params['format'] == 'keys') {
-			$sql .= "I.key";
-		}
-		else if ($params['format'] == 'versions') {
-			$sql .= "I.key, I.version";
+		
+		// In /top mode, use the parent item's values for most joins
+		if ($onlyTopLevel) {
+			$itemIDSelector = "COALESCE(IA.sourceItemID, INo.sourceItemID, I.itemID)";
+			$itemKeySelector = "COALESCE(IP.key, I.key)";
+			$itemTypeIDSelector = "COALESCE(IP.itemTypeID, I.itemTypeID)";
 		}
 		else {
-			$sql .= "I.itemID";
+			$itemIDSelector = "I.itemID";
+			$itemKeySelector = "I.key";
+			$itemTypeIDSelector = "I.itemTypeID";
+		}
+		
+		if ($params['format'] == 'keys' || $params['format'] == 'versions') {
+			// In /top mode, display the parent item of matching items
+			$sql .= "$itemKeySelector AS `key`";
+			
+			if ($params['format'] == 'versions') {
+				if ($onlyTopLevel) {
+					$sql .= ", COALESCE(IP.version, I.version) AS version";
+				}
+				else {
+					$sql .= ", I.version";
+				}
+			}
+		}
+		else {
+			$sql .= "$itemIDSelector AS itemID";
 		}
 		$sql .= " FROM items I ";
 		$sqlParams = array($libraryID);
 		
+		// For /top, we need the parent itemID
+		if ($onlyTopLevel) {
+			$sql .= "LEFT JOIN itemAttachments IA ON (IA.itemID=I.itemID) ";
+		}
+		
+		// For /top, we need the parent itemID; for 'q' we need the note; for sorting by title,
+		// we need the note title
+		if ($onlyTopLevel || !empty($params['q']) || $titleSort) {
+			$sql .= "LEFT JOIN itemNotes INo ON (INo.itemID=I.itemID) ";
+		}
+		
+		// For some /top requests, pull in the parent item's items row
+		if ($onlyTopLevel && ($params['format'] == 'keys' || $params['format'] == 'versions' || $parentItemSort)) {
+			$sql .= "LEFT JOIN items IP ON ($itemIDSelector=IP.itemID) ";
+		}
+		
+		// Pull in titles
 		if (!empty($params['q']) || $titleSort) {
 			$titleFieldIDs = array_merge(
 				array(Zotero_ItemFields::getID('title')),
 				Zotero_ItemFields::getTypeFieldsFromBase('title')
 			);
-			$sql .= "LEFT JOIN itemData IDT ON (IDT.itemID=I.itemID AND IDT.fieldID IN ("
-				. implode(',', $titleFieldIDs) . ")) ";
+			$sql .= "LEFT JOIN itemData IDT ON (IDT.itemID=I.itemID AND IDT.fieldID IN "
+				. "(" . implode(',', $titleFieldIDs) . ")) ";
+		}
+		
+		// When sorting by title in /top mode, we need the title of the parent item
+		if ($onlyTopLevel && $titleSort) {
+			$titleSortDataTable = "IDTSort";
+			$titleSortNoteTable = "INoSort";
+			$sql .= "LEFT JOIN itemData IDTSort ON (IDTSort.itemID=$itemIDSelector AND "
+				. "IDTSort.fieldID IN (" . implode(',', $titleFieldIDs) . ")) "
+				. "LEFT JOIN itemNotes INoSort ON (INoSort.itemID=$itemIDSelector) ";
+		}
+		else {
+			$titleSortDataTable = "IDT";
+			$titleSortNoteTable = "INo";
 		}
 		
 		if (!empty($params['q'])) {
-			$sql .= "LEFT JOIN itemCreators IC ON (IC.itemID=I.itemID)
-					LEFT JOIN creators C ON (C.creatorID=IC.creatorID) ";
-		}
-		if ($onlyTopLevel || !empty($params['q']) || $titleSort) {
-			$sql .= "LEFT JOIN itemNotes INo ON (INo.itemID=I.itemID) ";
-		}
-		if ($onlyTopLevel) {
-			$sql .= "LEFT JOIN itemAttachments IA ON (IA.itemID=I.itemID) ";
+			// Pull in creators
+			$sql .= "LEFT JOIN itemCreators IC ON (IC.itemID=I.itemID) "
+				. "LEFT JOIN creators C ON (C.creatorID=IC.creatorID) ";
+			
+			// Pull in dates
+			$dateFieldIDs = array_merge(
+				array(Zotero_ItemFields::getID('date')),
+				Zotero_ItemFields::getTypeFieldsFromBase('date')
+			);
+			$sql .= "LEFT JOIN itemData IDD ON (IDD.itemID=I.itemID AND IDD.fieldID IN "
+					. "(" . implode(',', $dateFieldIDs) . ")) ";
 		}
 		if (!$includeTrashed) {
 			$sql .= "LEFT JOIN deletedItems DI ON (DI.itemID=I.itemID) ";
+			
+			// In /top mode, we don't want to show results for deleted parents or children
+			if ($onlyTopLevel) {
+				$sql .= "LEFT JOIN deletedItems DIP ON (DIP.itemID=$itemIDSelector) ";
+			}
 		}
 		if (!empty($params['order'])) {
 			switch ($params['order']) {
 				case 'title':
 				case 'creator':
-					$sql .= "LEFT JOIN itemSortFields ISF ON (ISF.itemID=I.itemID) ";
+					$sql .= "LEFT JOIN itemSortFields ISF ON (ISF.itemID=$itemIDSelector) ";
 					break;
 				
 				case 'date':
-					$dateFieldIDs = array_merge(
-						array(Zotero_ItemFields::getID('date')),
-						Zotero_ItemFields::getTypeFieldsFromBase('date')
-					);
-					
-					$sql .= "LEFT JOIN itemData IDD ON (IDD.itemID=I.itemID AND IDD.fieldID IN ("
-						. implode(',', $dateFieldIDs) . ")) ";
+					// When sorting by date in /top mode, we need the date of the parent item
+					if ($onlyTopLevel) {
+						$sortTable = "IDDSort";
+						// Pull in dates
+						$dateFieldIDs = array_merge(
+							array(Zotero_ItemFields::getID('date')),
+							Zotero_ItemFields::getTypeFieldsFromBase('date')
+						);
+						$sql .= "LEFT JOIN itemData IDDSort ON (IDDSort.itemID=$itemIDSelector AND "
+							. "IDDSort.fieldID IN (" . implode(',', $dateFieldIDs) . ")) ";
+					}
+					// If we didn't already pull in dates for a quick search, pull in here
+					else {
+						$sortTable = "IDD";
+						if (empty($params['q'])) {
+							$dateFieldIDs = array_merge(
+								array(Zotero_ItemFields::getID('date')),
+								Zotero_ItemFields::getTypeFieldsFromBase('date')
+							);
+							$sql .= "LEFT JOIN itemData IDD ON (IDD.itemID=I.itemID AND IDD.fieldID IN ("
+								. implode(',', $dateFieldIDs) . ")) ";
+						}
+					}
 					break;
 				
 				case 'itemType':
@@ -204,7 +280,7 @@ class Zotero_Items extends Zotero_DataObjects {
 					}
 					
 					// Join temp table to query
-					$sql .= "JOIN tmpItemTypeNames TITN ON (TITN.itemTypeID=I.itemTypeID) ";
+					$sql .= "JOIN tmpItemTypeNames TITN ON (TITN.itemTypeID=$itemTypeIDSelector) ";
 					break;
 				
 				case 'addedBy':
@@ -248,25 +324,41 @@ class Zotero_Items extends Zotero_DataObjects {
 		
 		$sql .= "WHERE I.libraryID=? ";
 		
-		if ($onlyTopLevel) {
-			$sql .= "AND INo.sourceItemID IS NULL AND IA.sourceItemID IS NULL ";
-		}
 		if (!$includeTrashed) {
 			$sql .= "AND DI.itemID IS NULL ";
+			
+			// Hide deleted parents in /top mode
+			if ($onlyTopLevel) {
+				$sql .= "AND DIP.itemID IS NULL ";
+			}
 		}
 		
-		// Search on title and creators
+		// Search on title, creators, and dates
 		if (!empty($params['q'])) {
 			$sql .= "AND (";
 			
 			$sql .= "IDT.value LIKE ? ";
 			$sqlParams[] = '%' . $params['q'] . '%';
 			
-			$sql .= "OR title LIKE ? ";
+			$sql .= "OR INo.title LIKE ? ";
 			$sqlParams[] = '%' . $params['q'] . '%';
 			
-			$sql .= "OR TRIM(CONCAT(firstName, ' ', lastName)) LIKE ?";
+			$sql .= "OR TRIM(CONCAT(firstName, ' ', lastName)) LIKE ? ";
 			$sqlParams[] = '%' . $params['q'] . '%';
+			
+			$sql .= "OR SUBSTR(IDD.value, 1, 4) = ?";
+			$sqlParams[] = $params['q'];
+			
+			// Full-text search
+			if ($params['qmode'] == 'everything') {
+				$ftKeys = Zotero_FullText::searchInLibrary($libraryID, $params['q']);
+				if ($ftKeys) {
+					$sql .= " OR I.key IN ("
+						. implode(', ', array_fill(0, sizeOf($ftKeys), '?'))
+						. ") ";
+					$sqlParams = array_merge($sqlParams, $ftKeys);
+				}
+			}
 			
 			$sql .= ") ";
 		}
@@ -306,7 +398,7 @@ class Zotero_Items extends Zotero_DataObjects {
 		}
 		
 		// TEMP: for sync transition
-		if (!empty($params['newertime'])) {
+		if (!empty($params['newertime']) && $params['newertime'] != 1) {
 			$sql .= "AND I.serverDateModified >= FROM_UNIXTIME(?) ";
 			$sqlParams[] = $params['newertime'];
 		}
@@ -401,7 +493,12 @@ class Zotero_Items extends Zotero_DataObjects {
 				case 'dateAdded':
 				case 'dateModified':
 				case 'serverDateModified':
-					$orderSQL = "I." . $params['order'];
+					if ($onlyTopLevel) {
+						$orderSQL = "IP." . $params['order'];
+					}
+					else {
+						$orderSQL = "I." . $params['order'];
+					}
 					break;
 				
 				case 'itemType';
@@ -409,7 +506,7 @@ class Zotero_Items extends Zotero_DataObjects {
 					break;
 				
 				case 'title':
-					$orderSQL = "IFNULL(COALESCE(sortTitle, IDT.value, INo.title), '')";
+					$orderSQL = "IFNULL(COALESCE(sortTitle, $titleSortDataTable.value, $titleSortNoteTable.title), '')";
 					break;
 				
 				case 'creator':
@@ -418,7 +515,7 @@ class Zotero_Items extends Zotero_DataObjects {
 				
 				// TODO: generic base field mapping-aware sorting
 				case 'date':
-					$orderSQL = "IDD.value";
+					$orderSQL = "$sortTable.value";
 					break;
 				
 				case 'addedBy':
@@ -426,7 +523,7 @@ class Zotero_Items extends Zotero_DataObjects {
 						$orderSQL = "TCBU.username";
 					}
 					else {
-						$orderSQL = "I.dateAdded";
+						$orderSQL = "IP.dateAdded";
 						$params['sort'] = 'desc';
 					}
 					break;
@@ -464,11 +561,29 @@ class Zotero_Items extends Zotero_DataObjects {
 		}
 		$sql .= "I.version " . (!empty($params['sort']) ? $params['sort'] : "ASC")
 			. ", I.itemID " . (!empty($params['sort']) ? $params['sort'] : "ASC") . " ";
+		
 		if (!empty($params['limit'])) {
 			$sql .= "LIMIT ?, ?";
 			$sqlParams[] = $params['start'] ? $params['start'] : 0;
 			$sqlParams[] = $params['limit'];
 		}
+		
+		// Log SQL statement with embedded parameters
+		/*if (true || !empty($_GET['sqldebug'])) {
+			error_log($onlyTopLevel);
+			
+			$debugSQL = "";
+			$parts = explode("?", $sql);
+			$debugSQLParams = $sqlParams;
+			foreach ($parts as $part) {
+				$val = array_shift($debugSQLParams);
+				$debugSQL .= $part;
+				if (!is_null($val)) {
+					$debugSQL .= is_int($val) ? $val : '"' . $val . '"';
+				}
+			}
+			error_log($debugSQL . ";");
+		}*/
 		
 		if ($params['format'] == 'versions') {
 			$rows = Zotero_DB::query($sql, $sqlParams, $shardID);
@@ -986,7 +1101,7 @@ class Zotero_Items extends Zotero_DataObjects {
 		$parent = $item->getSource();
 		$isRegularItem = !$parent && $item->isRegularItem();
 		$downloadDetails = $permissions->canAccess($item->libraryID, 'files')
-								? Zotero_S3::getDownloadDetails($item)
+								? Zotero_Storage::getDownloadDetails($item)
 								: false;
 		if ($isRegularItem) {
 			$numChildren = $permissions->canAccess($item->libraryID, 'notes')
@@ -1037,6 +1152,9 @@ class Zotero_Items extends Zotero_DataObjects {
 		$xmlstr = Z_Core::$MC->get($cacheKey);
 		if ($xmlstr) {
 			try {
+				// TEMP: Strip control characters
+				$xmlstr = Zotero_Utilities::cleanString($xmlstr, true);
+				
 				$doc = new DOMDocument;
 				$doc->loadXML($xmlstr);
 				$xpath = new DOMXpath($doc);
@@ -1217,7 +1335,7 @@ class Zotero_Items extends Zotero_DataObjects {
 			if (!empty($details['filename'])) {
 				$link['title'] = $details['filename'];
 			}
-			if (!empty($details['size'])) {
+			if (isset($details['size'])) {
 				$link['length'] = $details['size'];
 			}
 		}
@@ -1437,6 +1555,8 @@ class Zotero_Items extends Zotero_DataObjects {
 					error_log("Cached Atom item entry does not match");
 					error_log("  Cached: " . $xmlstr);
 					error_log("Uncached: " . $uncached);
+					
+					Z_Core::$MC->set($cacheKey, $uncached, 3600); // 1 hour for now
 				}
 			}
 		}
@@ -1654,40 +1774,15 @@ class Zotero_Items extends Zotero_DataObjects {
 					break;
 				
 				case 'tags':
-					// If item isn't yet saved, add tags below
-					if (!$item->id) {
-						$twoStage = true;
-						break;
-					}
-					$changed = $item->setTags($val, $userID) || $changed;
+					$item->setTags($val);
 					break;
 				
 				case 'collections':
-					// If item isn't yet saved, add collections below
-					if (!$item->id) {
-						$twoStage = true;
-						break;
-					}
-					
-					try {
-						 $changed = $item->setCollections($val, $userID) || $changed;
-					}
-					catch (Exception $e) {
-						if ($e->getCode() == Z_ERROR_COLLECTION_NOT_FOUND) {
-							throw new Exception($e->getMessage(), Z_ERROR_INVALID_INPUT);
-						}
-						throw $e;
-					}
+					$item->setCollections($val);
 					break;
 				
 				case 'relations':
-					// If item isn't yet saved, add relations below
-					if (!$item->id) {
-						$twoStage = true;
-						break;
-					}
-					
-					$changed = $item->setRelations($val, $userID) || $changed;
+					$item->setRelations($val);
 					break;
 				
 				case 'attachments':
@@ -1709,7 +1804,7 @@ class Zotero_Items extends Zotero_DataObjects {
 				
 				case 'contentType':
 				case 'charset':
-				case 'filename';
+				case 'filename':
 					$k = "attachment" . ucwords($key);
 					$item->$k = $val;
 					break;
@@ -1786,26 +1881,6 @@ class Zotero_Items extends Zotero_DataObjects {
 							$childItem->save();
 						}
 						break;
-					
-					case 'tags':
-						$changed = $item->setTags($val, $userID) || $changed;
-						break;
-					
-					case 'collections':
-						try {
-							$changed = $item->setCollections($val, $userID) || $changed;
-						}
-						catch (Exception $e) {
-							if ($e->getCode() == Z_ERROR_COLLECTION_NOT_FOUND) {
-								throw new Exception($e->getMessage(), Z_ERROR_INVALID_INPUT);
-							}
-							throw $e;
-						}
-						break;
-					
-					case 'relations':
-						$changed = $item->setRelations($val, $userID) || $changed;
-						break;
 				}
 			}
 		}
@@ -1845,7 +1920,10 @@ class Zotero_Items extends Zotero_DataObjects {
 			$requiredProps = array('itemType', 'tags');
 		}
 		else {
-			$requiredProps = array('itemType', 'tags', 'collections', 'relations');
+			$requiredProps = array('itemType', 'tags', 'relations');
+			if (!$isChild) {
+				$requiredProps[] = 'collections';
+			}
 		}
 		
 		foreach ($requiredProps as $prop) {
@@ -1963,7 +2041,7 @@ class Zotero_Items extends Zotero_DataObjects {
 					}
 					
 					if (!is_object($val)
-							// Allow an empty array, because it's annoying for clients otherwise
+							// Allow an empty array, because it's annoying for some clients otherwise
 							&& !(is_array($val) && empty($val))) {
 						throw new Exception("'$key' property must be an object", Z_ERROR_INVALID_INPUT);
 					}
@@ -1978,8 +2056,11 @@ class Zotero_Items extends Zotero_DataObjects {
 							throw new Exception("Unsupported predicate '$predicate'", Z_ERROR_INVALID_INPUT);
 						}
 						
-						if (!preg_match('/^http:\/\/zotero.org\/(users|groups)\/[0-9]+\/items\/[A-Z0-9]{8}$/', $object)) {
-							throw new Exception("'$key' values currently must be Zotero item URIs", Z_ERROR_INVALID_INPUT);
+						$arr = is_string($object) ? [$object] : $object;
+						foreach ($arr as $uri) {
+							if (!preg_match('/^http:\/\/zotero.org\/(users|groups)\/[0-9]+\/items\/[A-Z0-9]{8}$/', $uri)) {
+								throw new Exception("'$key' values currently must be Zotero item URIs", Z_ERROR_INVALID_INPUT);
+							}
 						}
 					}
 					break;

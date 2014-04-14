@@ -41,7 +41,7 @@ class FullTextTests extends APITests {
 	
 	public function testSetItemContent() {
 		$key = API::createItem("book", false, $this, 'key');
-		$xml = API::createAttachmentItem("imported_url", $key, $this, 'atom');
+		$xml = API::createAttachmentItem("imported_url", [], $key, $this, 'atom');
 		$data = API::parseDataFromAtomEntry($xml);
 		
 		$response = API::userGet(
@@ -54,6 +54,7 @@ class FullTextTests extends APITests {
 		$libraryVersion = API::getLibraryVersion();
 		
 		$content = "Here is some full-text content";
+		$pages = 50;
 		
 		// No Content-Type
 		$response = API::userPut(
@@ -61,17 +62,22 @@ class FullTextTests extends APITests {
 			"items/{$data['key']}/fulltext?key=" . self::$config['apiKey'],
 			$content
 		);
-		$this->assert400($response, "Content-Type must be text/plain");
+		$this->assert400($response, "Content-Type must be application/json");
 		
 		// Store content
 		$response = API::userPut(
 			self::$config['userID'],
 			"items/{$data['key']}/fulltext?key=" . self::$config['apiKey'],
-			$content,
-			array("Content-Type: text/plain")
+			json_encode([
+				"content" => $content,
+				"indexedPages" => $pages,
+				"totalPages" => $pages,
+				"invalidParam" => "shouldBeIgnored"
+			]),
+			array("Content-Type: application/json")
 		);
 		
-		$this->assert200($response);
+		$this->assert204($response);
 		$contentVersion = $response->getHeader("Last-Modified-Version");
 		$this->assertGreaterThan($libraryVersion, $contentVersion);
 		
@@ -81,9 +87,51 @@ class FullTextTests extends APITests {
 			"items/{$data['key']}/fulltext?key=" . self::$config['apiKey']
 		);
 		$this->assert200($response);
-		$this->assertContentType("text/plain; charset=UTF-8", $response);
-		$this->assertEquals($content, $response->getBody());
+		$this->assertContentType("application/json", $response);
+		$json = json_decode($response->getBody(), true);
+		$this->assertEquals($content, $json['content']);
+		$this->assertArrayHasKey('indexedPages', $json);
+		$this->assertArrayHasKey('totalPages', $json);
+		$this->assertEquals($pages, $json['indexedPages']);
+		$this->assertEquals($pages, $json['totalPages']);
+		$this->assertArrayNotHasKey("indexedChars", $json);
+		$this->assertArrayNotHasKey("invalidParam", $json);
 		$this->assertEquals($contentVersion, $response->getHeader("Last-Modified-Version"));
+	}
+	
+	
+	public function testModifyAttachmentWithFulltext() {
+		$key = API::createItem("book", false, $this, 'key');
+		$xml = API::createAttachmentItem("imported_url", [], $key, $this, 'atom');
+		$data = API::parseDataFromAtomEntry($xml);
+		$content = "Here is some full-text content";
+		$pages = 50;
+		
+		// Store content
+		$response = API::userPut(
+			self::$config['userID'],
+			"items/{$data['key']}/fulltext?key=" . self::$config['apiKey'],
+			json_encode([
+				"content" => $content,
+				"indexedPages" => $pages,
+				"totalPages" => $pages
+			]),
+			array("Content-Type: application/json")
+		);
+		$this->assert204($response);
+		
+		$json = json_decode($data['content'], true);
+		$json['title'] = "This is a new attachment title";
+		$json['contentType'] = 'text/plain';
+		
+		// Modify attachment item
+		$response = API::userPut(
+			self::$config['userID'],
+			"items/{$data['key']}?key=" . self::$config['apiKey'],
+			json_encode($json),
+			array("If-Unmodified-Since-Version: " . $data['version'])
+		);
+		$this->assert204($response);
 	}
 	
 	
@@ -92,7 +140,7 @@ class FullTextTests extends APITests {
 		
 		// Store content for one item
 		$key = API::createItem("book", false, $this, 'key');
-		$xml = API::createAttachmentItem("imported_url", $key, $this, 'atom');
+		$xml = API::createAttachmentItem("imported_url", [], $key, $this, 'atom');
 		$data = API::parseDataFromAtomEntry($xml);
 		$key1 = $data['key'];
 		
@@ -101,45 +149,125 @@ class FullTextTests extends APITests {
 		$response = API::userPut(
 			self::$config['userID'],
 			"items/$key1/fulltext?key=" . self::$config['apiKey'],
-			$content,
-			array("Content-Type: text/plain")
+			json_encode([
+				"content" => $content
+			]),
+			array("Content-Type: application/json")
 		);
-		$this->assert200($response);
+		$this->assert204($response);
 		$contentVersion1 = $response->getHeader("Last-Modified-Version");
+		$this->assertGreaterThan(0, $contentVersion1);
 		
 		// And another
 		$key = API::createItem("book", false, $this, 'key');
-		$xml = API::createAttachmentItem("imported_url", $key, $this, 'atom');
+		$xml = API::createAttachmentItem("imported_url", [], $key, $this, 'atom');
 		$data = API::parseDataFromAtomEntry($xml);
 		$key2 = $data['key'];
 		
 		$response = API::userPut(
 			self::$config['userID'],
 			"items/$key2/fulltext?key=" . self::$config['apiKey'],
-			$content,
-			array("Content-Type: text/plain")
+			json_encode([
+				"content" => $content
+			]),
+			array("Content-Type: application/json")
 		);
-		$this->assert200($response);
+		$this->assert204($response);
 		$contentVersion2 = $response->getHeader("Last-Modified-Version");
+		$this->assertGreaterThan(0, $contentVersion2);
 		
 		// Get newer one
 		$response = API::userGet(
 			self::$config['userID'],
-			"fulltext?key=" . self::$config['apiKey']
-				. "&newer=$contentVersion1&format=versions"
+			"fulltext?key=" . self::$config['apiKey'] . "&newer=$contentVersion1"
 		);
 		$this->assert200($response);
 		$this->assertContentType("application/json", $response);
+		$this->assertEquals($contentVersion2, $response->getHeader("Last-Modified-Version"));
 		$json = API::getJSONFromResponse($response);
 		$this->assertCount(1, $json);
 		$this->assertArrayHasKey($key2, $json);
 		$this->assertEquals($contentVersion2, $json[$key2]);
+		
+		// Get both with newer=0
+		$response = API::userGet(
+			self::$config['userID'],
+			"fulltext?key=" . self::$config['apiKey'] . "&newer=0"
+		);
+		$this->assert200($response);
+		$this->assertContentType("application/json", $response);
+		$json = API::getJSONFromResponse($response);
+		$this->assertCount(2, $json);
+		$this->assertArrayHasKey($key1, $json);
+		$this->assertEquals($contentVersion1, $json[$key1]);
+		$this->assertArrayHasKey($key1, $json);
+		$this->assertEquals($contentVersion2, $json[$key2]);
+	}
+	
+	
+	public function testSearchItemContent() {
+		$key = API::createItem("book", false, $this, 'key');
+		$xml = API::createAttachmentItem("imported_url", [], $key, $this, 'atom');
+		$data = API::parseDataFromAtomEntry($xml);
+		
+		$response = API::userGet(
+			self::$config['userID'],
+			"items/{$data['key']}/fulltext?key=" . self::$config['apiKey']
+		);
+		$this->assert404($response);
+		
+		$content = "Here is some unique full-text content";
+		$pages = 50;
+		
+		// Store content
+		$response = API::userPut(
+			self::$config['userID'],
+			"items/{$data['key']}/fulltext?key=" . self::$config['apiKey'],
+			json_encode([
+				"content" => $content,
+				"indexedPages" => $pages,
+				"totalPages" => $pages
+			]),
+			array("Content-Type: application/json")
+		);
+		
+		$this->assert204($response);
+		
+		// Wait for refresh
+		sleep(1);
+		
+		// Search for a word
+		$response = API::userGet(
+			self::$config['userID'],
+			"items?q=unique&qmode=everything&format=keys"
+			. "&key=" . self::$config['apiKey']
+		);
+		$this->assert200($response);
+		$this->assertEquals($data['key'], trim($response->getBody()));
+		
+		// Search for a phrase
+		$response = API::userGet(
+			self::$config['userID'],
+			"items?q=unique%20full-text&qmode=everything&format=keys"
+			. "&key=" . self::$config['apiKey']
+		);
+		$this->assert200($response);
+		$this->assertEquals($data['key'], trim($response->getBody()));
+		
+		// Search for nonexistent word
+		$response = API::userGet(
+			self::$config['userID'],
+			"items?q=nothing&qmode=everything&format=keys"
+			. "&key=" . self::$config['apiKey']
+		);
+		$this->assert200($response);
+		$this->assertEquals("", trim($response->getBody()));
 	}
 	
 	
 	public function testDeleteItemContent() {
 		$key = API::createItem("book", false, $this, 'key');
-		$xml = API::createAttachmentItem("imported_file", $key, $this, 'atom');
+		$xml = API::createAttachmentItem("imported_file", [], $key, $this, 'atom');
 		$data = API::parseDataFromAtomEntry($xml);
 		
 		$content = "Ыюм мютат дэбетиз конвынёры эю, ку мэль жкрипта трактатоз.\nПро ут чтэт эрепюят граэкйж, дуо нэ выро рыкючабо пырикюлёз.";
@@ -148,10 +276,13 @@ class FullTextTests extends APITests {
 		$response = API::userPut(
 			self::$config['userID'],
 			"items/{$data['key']}/fulltext?key=" . self::$config['apiKey'],
-			$content,
-			array("Content-Type: text/plain")
+			json_encode([
+				"content" => $content,
+				"indexedPages" => 50
+			]),
+			array("Content-Type: application/json")
 		);
-		$this->assert200($response);
+		$this->assert204($response);
 		$contentVersion = $response->getHeader("Last-Modified-Version");
 		
 		// Retrieve it
@@ -160,11 +291,18 @@ class FullTextTests extends APITests {
 			"items/{$data['key']}/fulltext?key=" . self::$config['apiKey']
 		);
 		$this->assert200($response);
+		$json = json_decode($response->getBody(), true);
+		$this->assertEquals($content, $json['content']);
+		$this->assertEquals(50, $json['indexedPages']);
 		
-		// Delete it
-		$response = API::userDelete(
+		// Set to empty string
+		$response = API::userPut(
 			self::$config['userID'],
-			"items/{$data['key']}/fulltext?key=" . self::$config['apiKey']
+			"items/{$data['key']}/fulltext?key=" . self::$config['apiKey'],
+			json_encode([
+				"content" => ""
+			]),
+			array("Content-Type: application/json")
 		);
 		$this->assert204($response);
 		$this->assertGreaterThan($contentVersion, $response->getHeader("Last-Modified-Version"));
@@ -174,6 +312,9 @@ class FullTextTests extends APITests {
 			self::$config['userID'],
 			"items/{$data['key']}/fulltext?key=" . self::$config['apiKey']
 		);
-		$this->assert404($response);
+		$this->assert200($response);
+		$json = json_decode($response->getBody(), true);
+		$this->assertEquals("", $json['content']);
+		$this->assertArrayNotHasKey("indexedPages", $json);
 	}
 }

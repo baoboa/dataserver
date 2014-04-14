@@ -20,10 +20,17 @@ class Z_CONFIG {
 	public static $API_SUPER_PASSWORD = '';
 	public static $SESSION_AUTH_KEY = '';
 	
-	public static $AWS_ACCESS_KEY = '';
+	public static $AWS_REGION = 'us-east-1';
+	public static $AWS_ACCESS_KEY = ''; // leave credentials empty to use IAM role
 	public static $AWS_SECRET_KEY = '';
 	public static $S3_BUCKET = '';
 	public static $S3_BUCKET_CACHE = '';
+	
+	public static $REDIS_HOSTS = [
+		'default' => 'redis1.localdomain',
+		'cache' => 'redis-cache.localdomain'
+	];
+	public static $REDIS_PREFIX = '';
 	
 	public static $MEMCACHED_ENABLED = true;
 	public static $MEMCACHED_SERVERS = array(
@@ -38,8 +45,7 @@ class Z_CONFIG {
 		"citeserver1.localdomain:8080", "citeserver2.localdomain:8080"
 	);
 	
-	public static $SEARCH_HOST = '';
-	public static $SEARCH_INDEX = '';
+	public static $SEARCH_HOSTS = [''];
 	
 	public static $SQS_QUEUE_URL_PREFIX = '';
 	public static $SQS_QUEUE_ITEM_UPDATES = 'item-updates';

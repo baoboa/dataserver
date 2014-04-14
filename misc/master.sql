@@ -338,6 +338,7 @@ CREATE TABLE `syncDownloadQueue` (
   `lastsync` timestamp NOT NULL DEFAULT '0000-00-00 00:00:00',
   `lastsyncMS` smallint(5) unsigned NOT NULL DEFAULT '0',
   `version` smallint(5) unsigned NOT NULL,
+  `params` mediumtext NOT NULL,
   `added` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `objects` int(10) unsigned NOT NULL,
   `lastCheck` timestamp NULL DEFAULT NULL,
@@ -470,6 +471,9 @@ ALTER TABLE `itemTypeCreatorTypes`
 ALTER TABLE `itemTypeFields`
   ADD CONSTRAINT `itemTypeFields_ibfk_1` FOREIGN KEY (`itemTypeID`) REFERENCES `itemTypes` (`itemTypeID`),
   ADD CONSTRAINT `itemTypeFields_ibfk_2` FOREIGN KEY (`fieldID`) REFERENCES `fields` (`fieldID`);
+
+ALTER TABLE `keys`
+  ADD CONSTRAINT `keys_ibfk_1` FOREIGN KEY (`userID`) REFERENCES `users` (`userID`) ON DELETE CASCADE;
 
 ALTER TABLE `keyPermissions`
   ADD CONSTRAINT `keyPermissions_ibfk_1` FOREIGN KEY (`keyID`) REFERENCES `keys` (`keyID`) ON DELETE CASCADE;

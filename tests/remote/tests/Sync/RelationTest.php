@@ -60,7 +60,7 @@ class SyncRelationTests extends PHPUnit_Framework_TestCase {
 		$items[] = array(
 			"key" => API::createItem("book", false, null, 'key'),
 			"relations" => array(
-				"owl:sameAs" => "http://zotero.org/groups/1/items/AAAAAAAA"
+				array("owl:sameAs", "http://zotero.org/groups/1/items/AAAAAAAA")
 			)
 		);
 		
@@ -73,11 +73,11 @@ class SyncRelationTests extends PHPUnit_Framework_TestCase {
 		foreach ($items as $item) {
 			$subject = 'http://zotero.org/users/'
 				. self::$config['userID'] . '/items/' . $item['key'];
-			foreach ($item['relations'] as $predicate => $object) {
+			foreach ($item['relations'] as $rel) {
 				$xmlstr .= '<relation libraryID="' . self::$config['libraryID'] . '">'
 				. "<subject>$subject</subject>"
-				. "<predicate>$predicate</predicate>"
-				. "<object>$object</object>"
+				. "<predicate>{$rel[0]}</predicate>"
+				. "<object>{$rel[1]}</object>"
 				. '</relation>';
 			}
 		}
@@ -94,9 +94,11 @@ class SyncRelationTests extends PHPUnit_Framework_TestCase {
 			);
 			$content = API::getContentFromResponse($response);
 			$json = json_decode($content, true);
-			$this->assertCount(sizeOf($item['relations']), $json['relations']);
-			foreach ($item['relations'] as $predicate => $object) {
-				$this->assertEquals($object, $json['relations'][$predicate]);
+			$uniquePredicates = array_unique(array_map(function ($x) { return $x[0]; }, $item['relations']));
+			$this->assertCount(sizeOf($uniquePredicates), $json['relations']);
+			foreach ($item['relations'] as $rel) {
+				$this->assertArrayHasKey($rel[0], $json['relations']);
+				$this->assertContains($rel[1], $json['relations'][$rel[0]]);
 			}
 		}
 		
@@ -126,10 +128,249 @@ class SyncRelationTests extends PHPUnit_Framework_TestCase {
 		$this->assertEquals(0, $xml->updated[0]->relations->count());
 		$this->assertEquals(1, $xml->updated[0]->deleted[0]->items[0]->item->count());
 		$this->assertEquals(sizeOf($item['relations']), $xml->updated[0]->deleted[0]->relations[0]->relation->count());
-		foreach ($item['relations'] as $predicate => $object) {
-			$relKey = md5($subject . "_" . $predicate . "_" . $object);
+		foreach ($item['relations'] as $rel) {
+			$relKey = md5($subject . "_" . $rel[0] . "_" . $rel[1]);
 			$this->assertEquals(1, sizeOf($xml->updated[0]->deleted[0]->relations[0]->xpath("relation[@key='$relKey']")));
 		}
+	}
+	
+	
+	public function testModifyRelationsArrayViaSync() {
+		$items = array();
+		$items[] = array(
+			"key" => API::createItem("book", false, null, 'key'),
+			"relations" => array(
+				array("owl:sameAs", "http://zotero.org/groups/1/items/AAAAAAAA"),
+				array("owl:sameAs", "http://zotero.org/groups/1/items/BBBBBBBB")
+			)
+		);
+		
+		$xml = Sync::updated(self::$sessionID);
+		$updateKey = $xml['updateKey'];
+		$lastSyncTimestamp = $xml['timestamp'];
+		
+		$xmlstr = '<data version="9">'
+			. '<relations>';
+		foreach ($items as $item) {
+			$subject = 'http://zotero.org/users/'
+				. self::$config['userID'] . '/items/' . $item['key'];
+			foreach ($item['relations'] as $rel) {
+				$xmlstr .= '<relation libraryID="' . self::$config['libraryID'] . '">'
+				. "<subject>$subject</subject>"
+				. "<predicate>{$rel[0]}</predicate>"
+				. "<object>{$rel[1]}</object>"
+				. '</relation>';
+			}
+		}
+		$xmlstr .= '</relations>'
+			. '</data>';
+		$response = Sync::upload(self::$sessionID, $updateKey, $xmlstr);
+		Sync::waitForUpload(self::$sessionID, $response, $this);
+		
+		// Check via API
+		foreach ($items as $item) {
+			$response = API::userGet(
+				self::$config['userID'],
+				"items/{$item['key']}?key=" . self::$config['apiKey'] . "&content=json"
+			);
+			$content = API::getContentFromResponse($response);
+			$json = json_decode($content, true);
+			$uniquePredicates = array_unique(array_map(function ($x) { return $x[0]; }, $item['relations']));
+			$this->assertCount(sizeOf($uniquePredicates), $json['relations']);
+			foreach ($item['relations'] as $rel) {
+				$this->assertArrayHasKey($rel[0], $json['relations']);
+				$this->assertContains($rel[1], $json['relations'][$rel[0]]);
+			}
+		}
+		
+		$xml = Sync::updated(self::$sessionID);
+		
+		// Deleting item via API should log sync deletes for relations
+		$item = $items[0];
+		$subject = 'http://zotero.org/users/'
+				. self::$config['userID'] . '/items/' . $item['key'];
+		
+		$response = API::userGet(
+			self::$config['userID'],
+			"items/{$item['key']}?key=" . self::$config['apiKey'] . "&content=json"
+		);
+		$this->assertEquals(200, $response->getStatus());
+		$libraryVersion = $response->getHeader('Last-Modified-Version');
+		
+		$response = API::userDelete(
+			self::$config['userID'],
+			"items/{$item['key']}?key=" . self::$config['apiKey'],
+			array("If-Unmodified-Since-Version: $libraryVersion")
+		);
+		$this->assertEquals(204, $response->getStatus());
+		
+		$xml = Sync::updated(self::$sessionID);
+		
+		$this->assertEquals(0, $xml->updated[0]->relations->count());
+		$this->assertEquals(1, $xml->updated[0]->deleted[0]->items[0]->item->count());
+		$this->assertEquals(sizeOf($item['relations']), $xml->updated[0]->deleted[0]->relations[0]->relation->count());
+		foreach ($item['relations'] as $rel) {
+			$relKey = md5($subject . "_" . $rel[0] . "_" . $rel[1]);
+			$this->assertEquals(1, sizeOf($xml->updated[0]->deleted[0]->relations[0]->xpath("relation[@key='$relKey']")));
+		}
+	}
+	
+	
+	public function testReverseSameAs() {
+		$items = array();
+		$item = [
+			"key" => API::createItem("book", false, null, 'key'),
+			"relations" => [
+				["owl:sameAs", "http://zotero.org/groups/1/items/AAAAAAAA"],
+			]
+		];
+		
+		$xml = Sync::updated(self::$sessionID);
+		$updateKey = $xml['updateKey'];
+		$lastSyncTimestamp = $xml['timestamp'];
+		
+		$xmlstr = '<data version="9">'
+			. '<relations>';
+		$subject = 'http://zotero.org/users/'
+			. self::$config['userID'] . '/items/' . $item['key'];
+		// Insert backwards, as client does via classic sync
+		// if group item is dragged to personal library
+		foreach ($item['relations'] as $rel) {
+			$xmlstr .= '<relation libraryID="' . self::$config['libraryID'] . '">'
+			. "<subject>{$rel[1]}</subject>"
+			. "<predicate>{$rel[0]}</predicate>"
+			. "<object>$subject</object>"
+			. '</relation>';
+		}
+		$xmlstr .= '</relations>'
+			. '</data>';
+		$response = Sync::upload(self::$sessionID, $updateKey, $xmlstr);
+		Sync::waitForUpload(self::$sessionID, $response, $this);
+		
+		// Check via API
+		$response = API::userGet(
+			self::$config['userID'],
+			"items/{$item['key']}?key=" . self::$config['apiKey'] . "&content=json"
+		);
+		$content = API::getContentFromResponse($response);
+		$json = json_decode($content, true);
+		$uniquePredicates = array_unique(array_map(function ($x) { return $x[0]; }, $item['relations']));
+		$this->assertCount(sizeOf($uniquePredicates), $json['relations']);
+		foreach ($item['relations'] as $rel) {
+			$this->assertArrayHasKey($rel[0], $json['relations']);
+			$this->assertContains($rel[1], $json['relations'][$rel[0]]);
+		}
+		
+		// PUT via API, which should be unchanged
+		$response = API::userPost(
+			self::$config['userID'],
+			"items?key=" . self::$config['apiKey'],
+			json_encode([
+				"items" => [
+					$json
+				]
+			])
+		);
+		$results = json_decode($response->getBody(), true);
+		$this->assertArrayHasKey('unchanged', $results);
+		$this->assertContains($item['key'], $results['unchanged']);
+		
+		// Add another owl:sameAs via API
+		if (is_string($json['relations']['owl:sameAs'])) {
+			$json['relations']['owl:sameAs'] = [$json['relations']['owl:sameAs']];
+		}
+		$newURI = "http://zotero.org/groups/1/items/BBBBBBBB";
+		$json['relations']['owl:sameAs'][] = $newURI;
+		$item['relations'][] = ['owl:sameAs', $newURI];
+		$response = API::userPost(
+			self::$config['userID'],
+			"items?key=" . self::$config['apiKey'],
+			json_encode([
+				"items" => [
+					$json
+				]
+			])
+		);
+		$this->assertEquals(200, $response->getStatus());
+		$results = json_decode($response->getBody(), true);
+		$this->assertArrayHasKey('success', $results);
+		$this->assertContains($item['key'], $results['success']);
+		
+		// Check via API
+		$response = API::userGet(
+			self::$config['userID'],
+			"items/{$item['key']}?key=" . self::$config['apiKey'] . "&content=json"
+		);
+		$content = API::getContentFromResponse($response);
+		$json = json_decode($content, true);
+		$uniquePredicates = array_unique(array_map(function ($x) { return $x[0]; }, $item['relations']));
+		$this->assertCount(sizeOf($uniquePredicates), $json['relations']);
+		foreach ($item['relations'] as $rel) {
+			$this->assertArrayHasKey($rel[0], $json['relations']);
+			$this->assertContains($rel[1], $json['relations'][$rel[0]]);
+		}
+		$this->assertArrayHasKey("owl:sameAs", $json['relations']);
+		$this->assertContains($newURI, $json['relations']['owl:sameAs']);
+		
+		$xml = Sync::updated(self::$sessionID);
+		$updateKey = $xml['updateKey'];
+		
+		// First URL should still be in reverse order
+		$this->assertEquals(2, sizeOf($xml->updated[0]->relations->xpath("//relations/relation")));
+		$subRel = $xml->updated[0]->relations->xpath("//relations/relation[subject/text() = '{$item['relations'][0][1]}']");
+		$objRel = $xml->updated[0]->relations->xpath("//relations/relation[object/text() = '$newURI']");
+		$this->assertEquals(1, sizeOf($subRel));
+		$this->assertEquals($subject, $subRel[0]->object);
+		$this->assertEquals(1, sizeOf($objRel));
+		$this->assertEquals($subject, $objRel[0]->subject);
+		
+		// Resave second relation via classic sync in reverse order
+		$xmlstr = '<data version="9"><relations>';
+		$xmlstr .= '<relation libraryID="' . self::$config['libraryID'] . '">'
+		. "<subject>$newURI</subject>"
+		. "<predicate>owl:sameAs</predicate>"
+		. "<object>$subject</object>"
+		. "</relation></relations></data>";
+		$response = Sync::upload(self::$sessionID, $updateKey, $xmlstr);
+		Sync::waitForUpload(self::$sessionID, $response, $this);
+		
+		$xml = Sync::updated(self::$sessionID);
+		$this->assertEquals(2, sizeOf($xml->updated[0]->relations->xpath("//relations/relation")));
+		
+		// Delete reverse relation via API
+		$response = API::userGet(
+			self::$config['userID'],
+			"items/{$item['key']}?key=" . self::$config['apiKey'] . "&content=json"
+		);
+		$content = API::getContentFromResponse($response);
+		$json = json_decode($content, true);
+		// Leave just the relation that's entered in normal order
+		$json['relations']['owl:sameAs'] = [$newURI];
+		$item['relations'] = ['owl:sameAs', $newURI];
+		$response = API::userPost(
+			self::$config['userID'],
+			"items?key=" . self::$config['apiKey'],
+			json_encode([
+				"items" => [
+					$json
+				]
+			])
+		);
+		$this->assertEquals(200, $response->getStatus());
+		$results = json_decode($response->getBody(), true);
+		$this->assertArrayHasKey('success', $results);
+		$this->assertContains($item['key'], $results['success']);
+		
+		$response = API::userGet(
+			self::$config['userID'],
+			"items/{$item['key']}?key=" . self::$config['apiKey'] . "&content=json"
+		);
+		$content = API::getContentFromResponse($response);
+		$json = json_decode($content, true);
+		$this->assertArrayHasKey("owl:sameAs", $json['relations']);
+		$this->assertContains($newURI, $json['relations']['owl:sameAs']);
+		// Should only have one relation left
+		$this->assertEquals(1, sizeOf($json['relations']['owl:sameAs']));
 	}
 	
 	
@@ -177,35 +418,41 @@ class SyncRelationTests extends PHPUnit_Framework_TestCase {
 				'owl:sameAs' => 'http://zotero.org/groups/1/items/AAAAAAAA'
 			)
 		), null, 'key');
-		$itemURI1 = 'http://zotero.org/users/'
-					. self::$config['userID'] . '/items/' . $itemKey1;
-		// dc:relation already exists, so item shouldn't change
+		$itemURI1 = 'http://zotero.org/users/' . self::$config['userID'] . '/items/' . $itemKey1;
+		
 		$itemKey2 = API::createItem("interview", array(
 			"relations" => array(
 				'dc:relation' => $itemURI1
 			)
 		), null, 'key');
-		$itemURI2 = 'http://zotero.org/users/'
-					. self::$config['userID'] . '/items/' . $itemKey2;
+		$itemURI2 = 'http://zotero.org/users/' . self::$config['userID'] . '/items/' . $itemKey2;
+		
+		$itemKey3 = API::createItem("book", null, null, 'key');
+		$itemURI3 = 'http://zotero.org/users/' . self::$config['userID'] . '/items/' . $itemKey3;
 		
 		$libraryVersion = API::getLibraryVersion();
 		
 		// Add related items via sync
 		$xml = Sync::updated(self::$sessionID);
+		
 		$updateKey = $xml['updateKey'];
 		$lastSyncTimestamp = $xml['timestamp'];
 		
 		$itemXML1 = array_shift($xml->updated[0]->items[0]->xpath("item[@key='$itemKey1']"));
 		$itemXML2 = array_shift($xml->updated[0]->items[0]->xpath("item[@key='$itemKey2']"));
+		$itemXML3 = array_shift($xml->updated[0]->items[0]->xpath("item[@key='$itemKey3']"));
 		$itemXML1['libraryID'] = self::$config['libraryID'];
 		$itemXML2['libraryID'] = self::$config['libraryID'];
-		$itemXML1->related = $itemKey2;
+		$itemXML3['libraryID'] = self::$config['libraryID'];
+		$itemXML1->related = $itemKey2 . ' ' . $itemKey3;
 		$itemXML2->related = $itemKey1;
+		$itemXML3->related = $itemKey1;
 		
 		$xmlstr = '<data version="9">'
 			. '<items>'
 			. $itemXML1->asXML()
 			. $itemXML2->asXML()
+			. $itemXML3->asXML()
 			. '</items>'
 			. '</data>';
 		$response = Sync::upload(self::$sessionID, $updateKey, $xmlstr);
@@ -218,8 +465,15 @@ class SyncRelationTests extends PHPUnit_Framework_TestCase {
 				. "&content=json&newer=$libraryVersion"
 		);
 		$xml = API::getXMLFromResponse($response);
-		$this->assertEquals(1, (int) array_shift($xml->xpath('/atom:feed/zapi:totalResults')));
-		$json = json_decode(API::getContentFromResponse($response), true);
-		$this->assertEquals($itemURI2, $json['relations']['dc:relation']);
+		// Item 2 already had the relation and shouldn't have been updated
+		$this->assertEquals(2, (int) array_shift($xml->xpath('/atom:feed/zapi:totalResults')));
+		$itemJSON1 = json_decode(array_shift($xml->xpath("//atom:entry[atom:id='$itemURI1']"))->content, 1);
+		$itemJSON3 = json_decode(array_shift($xml->xpath("//atom:entry[atom:id='$itemURI3']"))->content, 1);
+		$this->assertInternalType('array', $itemJSON1['relations']['dc:relation']);
+		$this->assertInternalType('string', $itemJSON3['relations']['dc:relation']);
+		$this->assertCount(2, $itemJSON1['relations']['dc:relation']);
+		$this->assertTrue(in_array($itemURI2, $itemJSON1['relations']['dc:relation']));
+		$this->assertTrue(in_array($itemURI3, $itemJSON1['relations']['dc:relation']));
+		$this->assertEquals($itemURI1, $itemJSON3['relations']['dc:relation']);
 	}
 }

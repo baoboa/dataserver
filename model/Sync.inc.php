@@ -112,7 +112,7 @@ class Zotero_Sync {
 	}
 	
 	
-	public static function queueDownload($userID, $sessionID, $lastsync, $version, $updatedObjects) {
+	public static function queueDownload($userID, $sessionID, $lastsync, $version, $updatedObjects, $params=array()) {
 		$syncQueueID = Zotero_ID::getBigInt();
 		
 		// If there's a completed process from this session, delete it, since it
@@ -121,8 +121,8 @@ class Zotero_Sync {
 		Zotero_DB::query($sql, $sessionID);
 		
 		$sql = "INSERT INTO syncDownloadQueue
-				(syncDownloadQueueID, processorHost, userID, sessionID, lastsync, version, objects)
-				VALUES (?, INET_ATON(?), ?, ?, FROM_UNIXTIME(?), ?, ?)";
+				(syncDownloadQueueID, processorHost, userID, sessionID, lastsync, version, params, objects)
+				VALUES (?, INET_ATON(?), ?, ?, FROM_UNIXTIME(?), ?, ?, ?)";
 		Zotero_DB::query(
 			$sql,
 			array(
@@ -132,6 +132,7 @@ class Zotero_Sync {
 				$sessionID,
 				$lastsync,
 				$version,
+				json_encode($params),
 				$updatedObjects
 			)
 		);
@@ -198,8 +199,8 @@ class Zotero_Sync {
 	}
 	
 	
-	public static function processDownload($userID, $lastsync, DOMDocument $doc) {
-		self::processDownloadInternal($userID, $lastsync, $doc);
+	public static function processDownload($userID, $lastsync, DOMDocument $doc, $params=[]) {
+		self::processDownloadInternal($userID, $lastsync, $doc, null, null, $params);
 	}
 	
 	
@@ -214,7 +215,7 @@ class Zotero_Sync {
 		// Get a queued process
 		$smallestFirst = Z_CONFIG::$SYNC_DOWNLOAD_SMALLEST_FIRST;
 		$sql = "SELECT syncDownloadQueueID, SDQ.userID,
-				UNIX_TIMESTAMP(lastsync) AS lastsync, version, added, objects, ipAddress
+				UNIX_TIMESTAMP(lastsync) AS lastsync, version, params, added, objects, ipAddress
 				FROM syncDownloadQueue SDQ JOIN sessions USING (sessionID)
 				WHERE started IS NULL ORDER BY tries > 4, ";
 		if ($smallestFirst) {
@@ -252,7 +253,9 @@ class Zotero_Sync {
 			$domResponse = $doc->importNode($domResponse, true);
 			$doc->appendChild($domResponse);
 			
-			self::processDownloadInternal($row['userID'], $row['lastsync'], $doc, $row['syncDownloadQueueID'], $syncProcessID);
+			$params = !empty($row['params']) ? json_decode($row['params'], true) : [];
+			
+			self::processDownloadInternal($row['userID'], $row['lastsync'], $doc, $row['syncDownloadQueueID'], $syncProcessID, $params);
 		}
 		catch (Exception $e) {
 			$error = true;
@@ -424,7 +427,7 @@ class Zotero_Sync {
 		$error = false;
 		$lockError = false;
 		try {
-			$xml = new SimpleXMLElement($row['xmldata']);
+			$xml = new SimpleXMLElement($row['xmldata'], LIBXML_COMPACT | LIBXML_PARSEHUGE);
 			$timestamp = self::processUploadInternal($row['userID'], $xml, $row['syncUploadQueueID'], $syncProcessID);
 		}
 		catch (Exception $e) {
@@ -484,10 +487,11 @@ class Zotero_Sync {
 				|| strpos($msg, "Deadlock found when trying to get lock; try restarting transaction") !== false
 				|| strpos($msg, "Too many connections") !== false
 				|| strpos($msg, "Can't connect to MySQL server") !==false
+				|| strpos($msg, "Connection refused") !==false
+				|| strpos($msg, "Connection timed out") !==false
 				|| $code == Z_ERROR_LIBRARY_TIMESTAMP_ALREADY_USED
 				|| $code == Z_ERROR_SHARD_READ_ONLY
-				|| $code == Z_ERROR_SHARD_UNAVAILABLE
-		) {
+				|| $code == Z_ERROR_SHARD_UNAVAILABLE) {
 			Z_Core::logError($e);
 			$sql = "UPDATE syncUploadQueue SET started=NULL, tries=tries+1 WHERE syncUploadQueueID=?";
 			Zotero_DB::query($sql, $row['syncUploadQueueID']);
@@ -590,7 +594,7 @@ class Zotero_Sync {
 		
 		try {
 			$doc = new DOMDocument();
-			$doc->loadXML($row['xmldata']);
+			$doc->loadXML($row['xmldata'], LIBXML_COMPACT | LIBXML_PARSEHUGE);
 			
 			// Get long tags
 			$value = Zotero_Tags::getLongDataValueFromXML($doc);
@@ -858,13 +862,12 @@ class Zotero_Sync {
 	}
 	
 	
-	public static function getCachedDownload($userID, $lastsync, $apiVersion) {
+	public static function getCachedDownload($userID, $lastsync, $apiVersion, $cacheKeyExtra="") {
 		if (!$lastsync) {
 			throw new Exception('$lastsync not provided');
 		}
 		
-		require_once 'AWS-SDK/sdk.class.php';
-		$s3 = new AmazonS3();
+		$s3Client = Z_Core::$AWS->get('s3');
 		
 		$s3Key = $apiVersion . "/" . md5(
 			Zotero_Users::getUpdateKey($userID)
@@ -872,69 +875,64 @@ class Zotero_Sync {
 			// Remove after 2.1 sync cutoff
 			. ($apiVersion >= 9 ? "_" . $apiVersion : "")
 			. "_" . self::$cacheVersion
+			. (!empty($cacheKeyExtra) ? "_" . $cacheKeyExtra : "")
 		);
 		
 		// Check S3 for file
 		try {
-			$response = $s3->get_object(
-				Z_CONFIG::$S3_BUCKET_CACHE,
-				$s3Key,
-				array(
-					'curlopts' => array(
-						CURLOPT_FORBID_REUSE => true
-					)
-				)
-			);
-			if ($response->isOK()) {
-				$xmldata = $response->body;
-			}
-			else if ($response->status == 404) {
-				$xmldata = false;
-			}
-			else {
-				throw new Exception($response->status . " " . $response->body);
-			}
+			$result = $s3Client->getObject([
+				'Bucket' => Z_CONFIG::$S3_BUCKET_CACHE,
+				'Key' => $s3Key
+			]);
+			$xmldata = (string) $result['Body'];
+		}
+		catch (Aws\S3\Exception\NoSuchKeyException $e) {
+			$xmldata = false;
 		}
 		catch (Exception $e) {
-			Z_Core::logError("Warning: '" . $e->getMessage() . "' getting cached download from S3");
+			Z_Core::logError("Warning: '" . $e . "' getting cached download from S3");
 			$xmldata = false;
 		}
 		
 		// Update the last-used timestamp in S3
 		if ($xmldata) {
-			$response = $s3->update_object(Z_CONFIG::$S3_BUCKET_CACHE, $s3Key, array(
-				'meta' => array(
-					'last-used' => time()
-				)
-			));
+			try {
+				$s3Client->copyObject([
+					'Bucket' => Z_CONFIG::$S3_BUCKET_CACHE,
+					'Key' => $s3Key,
+					'CopySource' => Z_CONFIG::$S3_BUCKET_CACHE . "/" . $s3Key,
+					'Metadata' => [
+						'last-used' => time()
+					],
+					'MetadataDirective' => 'REPLACE'
+				]);
+			}
+			catch (Exception $e) {
+				error_log("WARNING: " . $e);
+			}
 		}
 		
 		return $xmldata;
 	}
 	
 	
-	public static function cacheDownload($userID, $updateKey, $lastsync, $apiVersion, $xmldata) {
-		require_once 'AWS-SDK/sdk.class.php';
-		$s3 = new AmazonS3();
+	public static function cacheDownload($userID, $updateKey, $lastsync, $apiVersion, $xmldata, $cacheKeyExtra="") {
+		$s3Client = Z_Core::$AWS->get('s3');
 		
 		$s3Key = $apiVersion . "/" . md5(
 			$updateKey . "_" . $lastsync
 			// Remove after 2.1 sync cutoff
 			. ($apiVersion >= 9 ? "_" . $apiVersion : "")
 			. "_" . self::$cacheVersion
+			. (!empty($cacheKeyExtra) ? "_" . $cacheKeyExtra : "")
 		);
 		
 		// Add to S3
-		$response = $s3->create_object(
-			Z_CONFIG::$S3_BUCKET_CACHE,
-			$s3Key,
-			array(
-				'body' => $xmldata
-			)
-		);
-		if (!$response->isOK()) {
-			throw new Exception($response->status . " " . $response->body);
-		}
+		$response = $s3Client->putObject([
+			'Bucket' => Z_CONFIG::$S3_BUCKET_CACHE,
+			'Key' => $s3Key,
+			'Body' => $xmldata
+		]);
 	}
 	
 	
@@ -1061,15 +1059,19 @@ class Zotero_Sync {
 	// Private methods
 	//
 	//
-	private static function processDownloadInternal($userID, $lastsync, DOMDocument $doc, $syncDownloadQueueID=null, $syncDownloadProcessID=null) {
+	private static function processDownloadInternal($userID, $lastsync, DOMDocument $doc, $syncDownloadQueueID=null, $syncDownloadProcessID=null, $params=[]) {
 		$apiVersion = (int) $doc->documentElement->getAttribute('version');
 		
 		if ($lastsync == 1) {
 			StatsD::increment("sync.process.download.full");
 		}
 		
+		// TEMP
+		$cacheKeyExtra = (!empty($params['ft']) ? json_encode($params['ft']) : "")
+			. (!empty($params['ftkeys']) ? json_encode($params['ftkeys']) : "");
+		
 		try {
-			$cached = Zotero_Sync::getCachedDownload($userID, $lastsync, $apiVersion);
+			$cached = Zotero_Sync::getCachedDownload($userID, $lastsync, $apiVersion, $cacheKeyExtra);
 			if ($cached) {
 				$doc->loadXML($cached);
 				StatsD::increment("sync.process.download.cache.hit");
@@ -1242,6 +1244,59 @@ class Zotero_Sync {
 				}
 			}
 			
+			// Add full-text content if the client supports it
+			if (isset($params['ft'])) {
+				$libraries = Zotero_Libraries::getUserLibraries($userID);
+				$fulltextNode = false;
+				foreach ($libraries as $libraryID) {
+					if (!empty($params['ftkeys']) && $params['ftkeys'] === 'all') {
+						$ftlastsync = 1;
+					}
+					else {
+						$ftlastsync = $lastsync;
+					}
+					if (!empty($params['ftkeys'][$libraryID])) {
+						$keys = $params['ftkeys'][$libraryID];
+					}
+					else {
+						$keys = [];
+					}
+					$data = Zotero_FullText::getNewerInLibraryByTime($libraryID, $ftlastsync, $keys);
+					if ($data) {
+						if (!$fulltextNode) {
+							$fulltextNode = $doc->createElement('fulltexts');
+						}
+						$first = true;
+						$chars = 0;
+						$maxChars = 500000;
+						foreach ($data as $itemData) {
+							if ($params['ft']) {
+								$empty = false;
+								// If the current item would put us over 500K characters,
+								// leave it empty, unless it's the first one
+								$currentChars = strlen($itemData['content']);
+								if (!$first && (($chars + $currentChars) > $maxChars)) {
+									$empty = true;
+								}
+								else {
+									$chars += $currentChars;
+								}
+							}
+							// If full-text syncing is disabled, leave content empty
+							else {
+								$empty = true;
+							}
+							$first = false;
+							$node = Zotero_FullText::itemDataToXML($itemData, $doc, $empty);
+							$fulltextNode->appendChild($node);
+						}
+					}
+				}
+				if ($fulltextNode) {
+					$updatedNode->appendChild($fulltextNode);
+				}
+			}
+			
 			// Get earliest timestamp
 			$earliestModTime = Zotero_Users::getEarliestDataTimestamp($userID);
 			$doc->documentElement->setAttribute('earliest', $earliestModTime ? $earliestModTime : 0);
@@ -1318,7 +1373,7 @@ class Zotero_Sync {
 		// Cache response if response isn't empty
 		try {
 			if ($doc->documentElement->firstChild->hasChildNodes()) {
-				self::cacheDownload($userID, $updateKey, $lastsync, $apiVersion, $doc->saveXML());
+				self::cacheDownload($userID, $updateKey, $lastsync, $apiVersion, $doc->saveXML(), $cacheKeyExtra);
 			}
 		}
 		catch (Exception $e) {
@@ -1415,7 +1470,7 @@ class Zotero_Sync {
 				// Manual foreign key checks
 				//
 				// libraryID
-				foreach ($addedLibraryIDs as $addedLibraryID) {
+				foreach (array_unique($addedLibraryIDs) as $addedLibraryID) {
 					$shardID = Zotero_Shards::getByLibraryID($addedLibraryID);
 					$sql = "SELECT COUNT(*) FROM shardLibraries WHERE libraryID=?";
 					if (!Zotero_DB::valueQuery($sql, $addedLibraryID, $shardID)) {
@@ -1625,6 +1680,16 @@ class Zotero_Sync {
 				unset($xml->settings);
 			}
 			
+			if ($xml->fulltexts) {
+				// DOM
+				$xmlElements = dom_import_simplexml($xml->fulltexts);
+				$xmlElements = $xmlElements->getElementsByTagName('fulltext');
+				foreach ($xmlElements as $xmlElement) {
+					Zotero_FullText::indexFromXML($xmlElement, $userID);
+				}
+				unset($xml->fulltexts);
+			}
+			
 			// TODO: loop
 			if ($xml->deleted) {
 				// Delete collections
@@ -1800,7 +1865,7 @@ class Zotero_Sync {
 				throw new Exception("Incomplete collection hierarchy cannot be saved", Z_ERROR_COLLECTION_NOT_FOUND);
 			}
 			
-			self::saveCollections($unsaved);
+			self::saveCollections($unsaved, $userID);
 		}
 	}
 	

@@ -145,11 +145,14 @@ class API {
 	}
 	
 	
-	public function createAttachmentItem($linkMode, $parentKey=false, $context=false, $responseFormat='atom') {
+	public function createAttachmentItem($linkMode, $data=[], $parentKey=false, $context=false, $responseFormat='atom') {
 		self::loadConfig();
 		
 		$response = API::get("items/new?itemType=attachment&linkMode=$linkMode");
 		$json = json_decode($response->getBody());
+		foreach ($data as $key => $val) {
+			$json->{$key} = $val;
+		}
 		if ($parentKey) {
 			$json->parentItem = $parentKey;
 		}
@@ -198,11 +201,14 @@ class API {
 	}
 	
 	
-	public function groupCreateAttachmentItem($groupID, $linkMode, $parentKey=false, $context=false, $responseFormat='atom') {
+	public function groupCreateAttachmentItem($groupID, $linkMode, $data=[], $parentKey=false, $context=false, $responseFormat='atom') {
 		self::loadConfig();
 		
 		$response = API::get("items/new?itemType=attachment&linkMode=$linkMode");
 		$json = json_decode($response->getBody());
+		foreach ($data as $key => $val) {
+			$json->{$key} = $val;
+		}
 		if ($parentKey) {
 			$json->parentItem = $parentKey;
 		}
@@ -752,12 +758,12 @@ class API {
 		
 		$json = self::getJSONFromResponse($response);
 		
-		if ($responseFormat != 'json' && sizeOf($json['success']) != 1) {
+		if ($responseFormat != 'responsejson' && sizeOf($json['success']) != 1) {
 			var_dump($json);
 			throw new Exception("$uctype creation failed");
 		}
 		
-		if ($responseFormat == 'json') {
+		if ($responseFormat == 'responsejson') {
 			return $json;
 		}
 		
@@ -781,6 +787,9 @@ class API {
 		}
 		if ($responseFormat == 'content') {
 			return $data['content'];
+		}
+		if ($responseFormat == 'json') {
+			return json_decode($data['content'], true);
 		}
 		
 		throw new Exception("Invalid response format '$responseFormat'");

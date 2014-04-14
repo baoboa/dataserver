@@ -284,20 +284,32 @@ class SyncController extends Controller {
 			}
 			Zotero_DB::commit();
 			
-			// Not locked, so clear wait index
-			$this->clearWaitTime($this->sessionID);
-			
 			$queue = true;
 			if (Z_ENV_TESTING_SITE && !empty($_GET['noqueue'])) {
 				$queue = false;
 			}
 			
+			// TEMP
+			$cacheKeyExtra = (!empty($_POST['ft']) ? json_encode($_POST['ft']) : "")
+				. (!empty($_POST['ftkeys']) ? json_encode($_POST['ftkeys']) : "");
+			
 			// If we have a cached response, return that
 			try {
 				$startedTimestamp = microtime(true);
-				$cached = Zotero_Sync::getCachedDownload($this->userID, $lastsync, $this->apiVersion);
+				$cached = Zotero_Sync::getCachedDownload($this->userID, $lastsync, $this->apiVersion, $cacheKeyExtra);
+				
+				// Not locked, so clear wait index
+				$this->clearWaitTime($this->sessionID);
+				
 				if ($cached) {
-					$this->responseXML = simplexml_load_string($cached);
+					$this->responseXML = simplexml_load_string($cached, "SimpleXMLElement", LIBXML_COMPACT | LIBXML_PARSEHUGE);
+					// TEMP
+					if (!$this->responseXML) {
+						error_log("Invalid cached XML data -- stripping control characters");
+						// Strip control characters in XML data
+						$cached = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $cached);
+						$this->responseXML = simplexml_load_string($cached, "SimpleXMLElement", LIBXML_COMPACT | LIBXML_PARSEHUGE);
+					}
 					
 					$duration = round((float) microtime(true) - $startedTimestamp, 2);
 					Zotero_Sync::logDownload(
@@ -348,8 +360,15 @@ class SyncController extends Controller {
 				$queue = false;
 			}
 			
+			$params = [];
+			if (isset($_POST['ft'])) $params['ft'] = $_POST['ft'];
+			if (isset($_POST['ftkeys'])) {
+				$queue = true;
+				$params['ftkeys'] = $_POST['ftkeys'];
+			}
+			
 			if ($queue) {
-				Zotero_Sync::queueDownload($this->userID, $this->sessionID, $lastsync, $this->apiVersion, $num);
+				Zotero_Sync::queueDownload($this->userID, $this->sessionID, $lastsync, $this->apiVersion, $num, $params);
 				
 				try {
 					Zotero_Processors::notifyProcessors('download');
@@ -363,7 +382,7 @@ class SyncController extends Controller {
 			}
 			else {
 				try {
-					Zotero_Sync::processDownload($this->userID, $lastsync, $doc);
+					Zotero_Sync::processDownload($this->userID, $lastsync, $doc, $params);
 					$this->responseXML = simplexml_import_dom($doc);
 					
 					StatsD::increment("sync.process.download.immediate.success");
@@ -654,9 +673,10 @@ class SyncController extends Controller {
 	
 	
 	private function getWaitTime($sessionID) {
-		$index = Z_Core::$MC->get('syncWaitIndex_' . $sessionID);
+		$cacheKey = 'syncWaitIndex_' . $sessionID;
+		$index = Z_Core::$MC->get($cacheKey);
 		if ($index === false) {
-			Z_Core::$MC->add('syncWaitIndex_' . $sessionID, 0);
+			Z_Core::$MC->add($cacheKey, 1);
 			$index = 0;
 		}
 		
@@ -679,7 +699,7 @@ class SyncController extends Controller {
 			$wait = 130;
 		}
 		
-		Z_Core::$MC->increment('syncWaitIndex_' . $sessionID);
+		Z_Core::$MC->increment($cacheKey);
 		return $wait * 1000;
 	}
 	
@@ -713,7 +733,9 @@ class SyncController extends Controller {
 		if (strpos($msg, "Lock wait timeout exceeded; try restarting transaction") !== false
 				|| strpos($msg, "Deadlock found when trying to get lock; try restarting transaction") !== false
 				|| strpos($msg, "Too many connections") !== false
-				|| strpos($msg, "Can't connect to MySQL server") !==false) {
+				|| strpos($msg, "Can't connect to MySQL server") !==false
+				|| strpos($msg, " is down") !==false
+				|| $e->getCode() == Z_ERROR_SHARD_UNAVAILABLE) {
 			$waitTime = $this->getWaitTime($this->sessionID);
 			Z_Core::logError("WARNING: $msg -- sending sync wait ($waitTime)");
 			$locked = $this->responseXML->addChild('locked');

@@ -46,10 +46,11 @@ class Zotero_API {
 		// search
 		'fq' => '',
 		'q' => '',
+		'qmode' => 'titleCreatorYear',
 		'itemType' => '',
-		'itemKey' => '',
-		'collectionKey' => '',
-		'searchKey' => '',
+		'itemKey' => array(),
+		'collectionKey' => array(),
+		'searchKey' => array(),
 		'tag' => '',
 		'tagType' => '',
 		'newer' => 0,
@@ -300,9 +301,30 @@ class Zotero_API {
 					break;
 				
 				case 'sort':
-					if (!in_array($getParams['sort'], array('asc', 'desc'))) {
-						throw new Exception("Invalid 'sort' value '" . $getParams[$key] . "'", Z_ERROR_INVALID_INPUT);
+					if (!in_array($getParams[$key], array('asc', 'desc'))) {
+						throw new Exception("Invalid '$key' value '" . $getParams[$key] . "'", Z_ERROR_INVALID_INPUT);
 					}
+					break;
+				
+				case 'qmode':
+					if (!in_array($getParams[$key], array('titleCreatorYear', 'everything'))) {
+						throw new Exception("Invalid '$key' value '" . $getParams[$key] . "'", Z_ERROR_INVALID_INPUT);
+					}
+					break;
+				
+				case 'collectionKey':
+				case 'itemKey':
+				case 'searchKey':
+					// Allow leading/trailing commas
+					$objectKeys = trim($getParams[$key], ",");
+					$objectKeys = explode(",", $objectKeys);
+					// Make sure all keys are plausible
+					foreach ($objectKeys as $objectKey) {
+						if (!Zotero_ID::isValidKey($objectKey)) {
+							throw new Exception("Invalid '$key' value '" . $getParams[$key] . "'", Z_ERROR_INVALID_INPUT);
+						}
+					}
+					$getParams[$key] = $objectKeys;
 					break;
 			}
 			

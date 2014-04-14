@@ -61,7 +61,7 @@
     <interleave>
       <optional>
         <element name="items">
-          <oneOrMore>
+          <zeroOrMore>
             <element name="item">
               <choice>
                 <ref name="key"/>
@@ -226,12 +226,12 @@
                 </element>
               </optional>
             </element>
-          </oneOrMore>
+          </zeroOrMore>
         </element>
       </optional>
       <optional>
         <element name="creators">
-          <oneOrMore>
+          <zeroOrMore>
             <element name="creator">
               <optional>
                 <ref name="libraryID"/>
@@ -268,7 +268,7 @@
                 </element>
               </optional>
             </element>
-          </oneOrMore>
+          </zeroOrMore>
         </element>
       </optional>
       <optional>
@@ -418,6 +418,34 @@
             <element name="setting">
               <ref name="libraryID"/>
               <attribute name="name"/>
+              <optional>
+                <attribute name="version">
+                  <data type="integer"/>
+                </attribute>
+              </optional>
+              <text/>
+            </element>
+          </oneOrMore>
+        </element>
+      </optional>
+      <optional>
+        <element name="fulltexts">
+          <oneOrMore>
+            <element name="fulltext">
+              <ref name="libraryID"/>
+              <ref name="key"/>
+              <attribute name="indexedChars">
+                <data type="integer"/>
+              </attribute>
+              <attribute name="totalChars">
+                <data type="integer"/>
+              </attribute>
+              <attribute name="indexedPages">
+                <data type="integer"/>
+              </attribute>
+              <attribute name="totalPages">
+                <data type="integer"/>
+              </attribute>
               <optional>
                 <attribute name="version">
                   <data type="integer"/>

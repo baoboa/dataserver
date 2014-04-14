@@ -28,7 +28,6 @@ class ApiController extends Controller {
 	protected $writeTokenCacheTime = 43200; // 12 hours
 	
 	private $profile = false;
-	private $profileShard = 0;
 	private $timeLogThreshold = 5;
 	
 	protected $method;
@@ -79,7 +78,7 @@ class ApiController extends Controller {
 		register_shutdown_function(array($this, 'checkForFatalError'));
 		$this->method = $_SERVER['REQUEST_METHOD'];
 		
-		if (!in_array($this->method, array('HEAD', 'GET', 'PUT', 'POST', 'DELETE', 'PATCH'))) {
+		if (!in_array($this->method, array('HEAD', 'OPTIONS', 'GET', 'PUT', 'POST', 'DELETE', 'PATCH'))) {
 			$this->e501();
 		}
 		
@@ -94,6 +93,17 @@ class ApiController extends Controller {
 			die("Expect header is not supported");
 		}
 		
+		if (isset($_SERVER['HTTP_ORIGIN'])) {
+			header("Access-Control-Allow-Origin: *");
+			header("Access-Control-Allow-Methods: HEAD, GET, POST, PUT, PATCH, DELETE");
+			header("Access-Control-Allow-Headers: Content-Type, If-Match, If-None-Match, If-Modified-Since-Version, If-Unmodified-Since-Version, Zotero-API-Version, Zotero-Write-Token");
+			header("Access-Control-Expose-Headers: Backoff, ETag, Last-Modified-Version, Link, Retry-After, Zotero-API-Version");
+		}
+		
+		if ($this->method == 'OPTIONS') {
+			$this->end();
+		}
+		
 		if (in_array($this->method, array('POST', 'PUT', 'PATCH'))) {
 			$this->ifUnmodifiedSince =
 				isset($_SERVER['HTTP_IF_UNMODIFIED_SINCE'])
@@ -104,13 +114,14 @@ class ApiController extends Controller {
 					&& !in_array($this->action, array(
 						'clear',
 						'laststoragesync',
-						'removestoragefiles'))) {
+						'removestoragefiles',
+						'itemContent'))) {
 				$this->e400("$this->method data not provided");
 			}
 		}
 		
 		if ($this->profile) {
-			Zotero_DB::profileStart($this->profileShard);
+			Zotero_DB::profileStart();
 		}
 		
 		// If HTTP Basic Auth credentials provided, authenticate
@@ -516,7 +527,7 @@ class ApiController extends Controller {
 	
 	
 	protected function requireContentType($contentType) {
-		if ($_SERVER['CONTENT_TYPE'] != $contentType) {
+		if (empty($_SERVER['CONTENT_TYPE']) || $_SERVER['CONTENT_TYPE'] != $contentType) {
 			throw new Exception("Content-Type must be $contentType", Z_ERROR_INVALID_INPUT);
 		}
 	}
@@ -641,7 +652,7 @@ class ApiController extends Controller {
 	
 	protected function end() {
 		if ($this->profile) {
-			Zotero_DB::profileEnd($this->profileShard, false);
+			Zotero_DB::profileEnd($this->objectLibraryID, true);
 		}
 		
 		switch ($this->responseCode) {
@@ -714,8 +725,10 @@ class ApiController extends Controller {
 			
 			$xmlstr = $this->responseXML->asXML();
 			
-			$doc = new DOMDocument('1.0');
+			// TEMP: Strip control characters
+			$xmlstr = Zotero_Utilities::cleanString($xmlstr, true);
 			
+			$doc = new DOMDocument('1.0');
 			$doc->loadXML($xmlstr);
 			$doc->formatOutput = true;
 			
@@ -762,8 +775,17 @@ class ApiController extends Controller {
 		$time = $this->currentRequestTime();
 		if ($time > $this->timeLogThreshold) {
 			$this->timeLogged = true;
+			
+			$shardHostStr = "";
+			if (!empty($this->objectLibraryID)) {
+				$shardID = Zotero_Shards::getByLibraryID($this->objectLibraryID);
+				$shardInfo = Zotero_Shards::getShardInfo($shardID);
+				$shardHostStr = " with shard host " . $shardInfo['shardHostID'];
+			}
+			
 			error_log(
-				"Slow API request " . ($point ? " at point " . $point : "") . ": "
+				"Slow API request" . ($point ? " at point " . $point : "")
+				. $shardHostStr . ": "
 				. $time . " sec for "
 				. $_SERVER['REQUEST_METHOD'] . " " . $_SERVER['REQUEST_URI']
 			);
@@ -864,6 +886,22 @@ class ApiController extends Controller {
 	public function logTotalRequestTime() {
 		if (!Z_CONFIG::$STATSD_ENABLED) {
 			return;
+		}
+		
+		try {
+			if (!empty($this->objectLibraryID)) {
+				$shardID = Zotero_Shards::getByLibraryID($this->objectLibraryID);
+				$shardInfo = Zotero_Shards::getShardInfo($shardID);
+				$shardHostID = (int) $shardInfo['shardHostID'];
+				StatsD::timing(
+					"api.request.total_by_shard.$shardHostID",
+					(microtime(true) - $this->startTime) * 1000,
+					0.25
+				);
+			}
+		}
+		catch (Exception $e) {
+			error_log("WARNING: " . $e);
 		}
 		
 		StatsD::timing("api.memcached", Z_Core::$MC->requestTime * 1000, 0.25);
